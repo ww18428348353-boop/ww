@@ -126,9 +126,16 @@ set(APP_SOURCES
 )
 
 # ========= 可执行 =========
+# Windows EXE 图标 (.rc 嵌入 app.ico)
+set(APP_WIN_RC "")
+if(WIN32)
+    set(APP_WIN_RC "${CMAKE_SOURCE_DIR}/app.rc")
+endif()
+
 qt_add_executable(HighPro_LUT WIN32
     ${APP_SOURCES}
     ${APP_RESOURCES}
+    ${APP_WIN_RC}
 )
 
 target_include_directories(HighPro_LUT PRIVATE
@@ -151,8 +158,14 @@ target_link_libraries(HighPro_LUT PRIVATE
 
 set_target_properties(HighPro_LUT PROPERTIES
     WIN32_EXECUTABLE TRUE
-    OUTPUT_NAME "HighPro_LUT"
 )
+
+# 静态构建产物叫 LUT_Pro.exe; 动态构建仍叫 HighPro_LUT.exe
+if(HIGHPRO_STATIC_RUNTIME)
+    set_target_properties(HighPro_LUT PROPERTIES OUTPUT_NAME "LUT_Pro")
+else()
+    set_target_properties(HighPro_LUT PROPERTIES OUTPUT_NAME "HighPro_LUT")
+endif()
 
 # ========= 安装 =========
 install(TARGETS HighPro_LUT RUNTIME DESTINATION .)

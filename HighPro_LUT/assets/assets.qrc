@@ -5,5 +5,6 @@
         <file alias="shaders/fullscreen_quad.hlsl">shaders/fullscreen_quad.hlsl</file>
         <file alias="shaders/recolor.hlsl">shaders/recolor.hlsl</file>
         <file alias="shaders/effect_chain.hlsl">shaders/effect_chain.hlsl</file>
+        <file alias="icons/app.ico">icons/app.ico</file>
     </qresource>
 </RCC>

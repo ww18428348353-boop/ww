@@ -11,10 +11,18 @@
 
 # === Qt/C++ 构建目录 ===
 HighPro_LUT/build/
+HighPro_LUT/build-static/
 CMakeFiles/
 cmake-build-*/
 *.cmake
 CMakeCache.txt
+
+# === 本地构建脚本 / 日志 (不入库) ===
+HighPro_LUT/_*.bat
+HighPro_LUT/*_log.txt
+
+# === 不上传的本地文档 ===
+HighPro_LUT/HighPro_LUT单EXE打包完整方案_不含Git上传内容.md
 
 # === 打包工具 ===
 HighPro_LUT/tools/7zsd.sfx

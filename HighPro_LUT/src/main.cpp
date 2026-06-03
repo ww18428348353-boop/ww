@@ -8,6 +8,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QTimer>
+#include <QIcon>
 
 int main(int argc, char* argv[])
 {
@@ -22,6 +23,9 @@ int main(int argc, char* argv[])
 
     // Fusion 风格 + 暗色调更适合调色工具
     QApplication::setStyle(QStyleFactory::create("Fusion"));
+
+    // 应用图标 (任务栏 / Alt+Tab / 窗口左上)
+    QApplication::setWindowIcon(QIcon(":/icons/app.ico"));
 
     HighPro::AppSettings::instance().load();
 
