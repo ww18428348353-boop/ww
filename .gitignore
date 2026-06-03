@@ -1,0 +1,50 @@
+# === 编译产物 & 二进制 ===
+*.exe
+*.dll
+*.obj
+*.o
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.setup.exe
+
+# === Qt/C++ 构建目录 ===
+HighPro_LUT/build/
+CMakeFiles/
+cmake-build-*/
+*.cmake
+CMakeCache.txt
+
+# === 打包工具 ===
+HighPro_LUT/tools/7zsd.sfx
+
+# === 大素材文件（TGA/图片序列帧）===
+# 如果需要版本管理素材，请注释下面几行或使用 Git LFS
+AE测试/
+测试资源文件/
+输出颜色贴图/
+
+# === 压缩包 ===
+*.zip
+*.7z
+*.rar
+
+# === OS 生成文件 ===
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# === IDE ===
+.vs/
+.vscode/
+*.user
+*.suo
+*.sln.docstates
+
+# === Python ===
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/

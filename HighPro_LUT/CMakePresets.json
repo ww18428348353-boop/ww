@@ -1,0 +1,57 @@
+{
+    "version": 4,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 20,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "msvc-debug",
+            "displayName": "MSVC Debug",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_PREFIX_PATH": "C:/Qt/6.11.1/msvc2022_64",
+                "CMAKE_C_COMPILER": "cl",
+                "CMAKE_CXX_COMPILER": "cl"
+            }
+        },
+        {
+            "name": "msvc-release",
+            "displayName": "MSVC Release",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_PREFIX_PATH": "C:/Qt/6.11.1/msvc2022_64",
+                "CMAKE_C_COMPILER": "cl",
+                "CMAKE_CXX_COMPILER": "cl"
+            }
+        },
+        {
+            "name": "msvc-release-static",
+            "displayName": "MSVC Release Static (M10)",
+            "inherits": "msvc-release",
+            "binaryDir": "${sourceDir}/build/release_static",
+            "cacheVariables": {
+                "HIGHPRO_STATIC_RUNTIME": "ON"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "debug",
+            "configurePreset": "msvc-debug"
+        },
+        {
+            "name": "release",
+            "configurePreset": "msvc-release"
+        },
+        {
+            "name": "release-static",
+            "configurePreset": "msvc-release-static"
+        }
+    ]
+}

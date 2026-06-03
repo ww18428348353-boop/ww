@@ -1,0 +1,6 @@
+﻿;!@Install@!UTF-8!
+Title="HighPro_LUT 高性能序列帧角色换色工具"
+BeginPrompt="是否安装 HighPro_LUT? 程序会解压到 %TEMP% 后启动"
+RunProgram="HighPro_LUT.exe"
+GUIMode="2"
+;!@InstallEnd@!

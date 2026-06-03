@@ -1,0 +1,9 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/">
+        <file alias="lut/default.png">颜色图.png</file>
+        <file alias="shaders/fullscreen_quad.hlsl">shaders/fullscreen_quad.hlsl</file>
+        <file alias="shaders/recolor.hlsl">shaders/recolor.hlsl</file>
+        <file alias="shaders/effect_chain.hlsl">shaders/effect_chain.hlsl</file>
+    </qresource>
+</RCC>
