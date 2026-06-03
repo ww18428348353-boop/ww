@@ -197,6 +197,15 @@ void PreviewPanel::buildUi()
     m_fullCanvasBtn->setToolTip(QStringLiteral("切换全屏预览画布 (Ctrl+Space). 退出后 dock 自动恢复"));
     line1->addWidget(m_fullCanvasBtn);
 
+    // 显示 / 关闭 画布里未上锁的方案 (本体始终保留, 锁定方案始终保留)
+    m_hideUnlockedBtn = new QPushButton(QStringLiteral("🔒 只看锁定"), this);
+    m_hideUnlockedBtn->setCheckable(true);
+    m_hideUnlockedBtn->setChecked(m_hideUnlocked);
+    m_hideUnlockedBtn->setToolTip(QStringLiteral(
+        "勾选: 画布只渲染锁定 🔒 的方案 (本体始终显示).\n"
+        "便于在大批量随机后聚焦看挑选出的精品配色."));
+    line1->addWidget(m_hideUnlockedBtn);
+
     line1->addStretch(1);
     root->addLayout(line1);
 
@@ -349,6 +358,12 @@ void PreviewPanel::connectSignals()
                 }
                 mw->setUpdatesEnabled(true);
             }
+        });
+    }
+    if (m_hideUnlockedBtn) {
+        connect(m_hideUnlockedBtn, &QPushButton::toggled, this, [this](bool on){
+            m_hideUnlocked = on;
+            if (m_canvas) m_canvas->requestRender();
         });
     }
 
@@ -564,6 +579,7 @@ void PreviewPanel::onExportGif()
     if (m_playTimer.isActive()) m_playTimer.stop();
     m_playing = false;
     m_showLabel = m_gifShowId;
+    m_renderingForGif = true;      // 关闭三角标识 (用户要求 GIF 干净)
     const int savedFrame = proj.currentFrame;
 
     // 为 GIF 渲染搭一份"独立"的 cells 计算: 不依赖 D3DWidget 当前 zoom/pan.
@@ -634,6 +650,7 @@ void PreviewPanel::onExportGif()
 
     // 恢复
     m_showLabel = savedShowLabel;
+    m_renderingForGif = false;
     if (m_canvas) m_canvas->setContentZoom(savedZoom);
     ctl.setCurrentFrame(savedFrame);
     m_playing = wasPlaying;
@@ -814,7 +831,26 @@ void PreviewPanel::render(ID3D11RenderTargetView* rtv, int w, int h)
     //   N ≤ 21 → 3 行 7 列
     //   N ≤ 28 → 4 行 7 列 (上限)
     // 排列规则: 本体方案永远在 "右起第 1 格" (idx 顺序 [0,1,2,...] 从右到左).
-    const int N = qMin((int)proj.schemes.size(), 28);
+    //
+    // "🔒 只看锁定" 模式: 过滤出本体 + 全部 locked 方案, 把它们当成一组新的 schemes
+    //                   重新走 N/cols/rows 布局; 原始 idx 通过 visibleIdx 映射保留 (label 显示).
+    QVector<int> visibleIdx;
+    {
+        const int total = (int)proj.schemes.size();
+        if (m_hideUnlocked) {
+            for (int i = 0; i < total; ++i) {
+                if (proj.schemes[i].isBuiltin || proj.schemes[i].locked) visibleIdx.push_back(i);
+            }
+            // 边缘: 没有任何锁定方案 → 至少保留本体, 否则画布空白用户摸不着头脑
+            if (visibleIdx.size() <= 1 && total > 0) {
+                visibleIdx.clear();
+                for (int i = 0; i < total; ++i) visibleIdx.push_back(i);
+            }
+        } else {
+            for (int i = 0; i < total; ++i) visibleIdx.push_back(i);
+        }
+    }
+    const int N = qMin(visibleIdx.size(), 28);
     const int cols = qMin(N, 7);
     const int rows = (N + cols - 1) / cols;
 
@@ -875,10 +911,10 @@ void PreviewPanel::render(ID3D11RenderTargetView* rtv, int w, int h)
 
     // label 顶 y = cell 顶 + m_labelGapY * scale (随 zoom 等比, 与"X/Y 间距"一致语义).
     // m_labelGapY > 0 → 向下偏移; < 0 → 向上 (会被钳回 0). 默认 30px.
+    // 缩放规则: scale = zoom (而非 cell/base 比, 否则放大时被钳到 1.0 → ID 不跟随放大).
     auto cellLabelY = [&](int cellW, int cellH) -> int {
-        float scale = qMin(float(cellW) / baseW, float(cellH) / baseH);
-        if (scale > 1.0f) scale = 1.0f;
-        int y = (int)std::round(m_labelGapY * (double)scale);
+        const double scale = zoom;          // 直接用画布 zoom, 放大缩小都等比
+        int y = (int)std::round(m_labelGapY * scale);
         return qBound(0, y, qMax(0, cellH - 30));
     };
 
@@ -887,26 +923,27 @@ void PreviewPanel::render(ID3D11RenderTargetView* rtv, int w, int h)
     for (int i = 0; i < N; ++i) {
         const int row = i / cols;
         const int col = i % cols;
+        const int realIdx = visibleIdx[i];      // 原 schemes 下标 (供 label / 高亮匹配)
         FrameRenderer::Cell c;
         c.x = originX + col * stepX;
         c.y = originY + row * stepY;
         c.w = cellW;
         c.h = cellH;
-        c.items = buildItemsForScheme(proj.schemes[i]);
-        c.highlighted = (i == curIdx);
+        c.items = buildItemsForScheme(proj.schemes[realIdx]);
+        c.highlighted = (realIdx == curIdx);
 
         // 画布 label: 仅 ID (如 "02"); 锁住的方案末尾追加 "-锁".
         // 本体 (idx 0) 不画 label (用户偏好: 仅编号; 本体无意义).
-        if (m_showLabel && i > 0) {
-            QString text = QString("%1").arg(i, 2, 10, QChar('0'));
-            if (proj.schemes[i].locked) text += QStringLiteral("-锁");
+        if (m_showLabel && realIdx > 0) {
+            QString text = QString("%1").arg(realIdx, 2, 10, QChar('0'));
+            if (proj.schemes[realIdx].locked) text += QStringLiteral("-锁");
             c.label = text;
             // 锁定时换暖色, 易区分
-            c.labelColor = proj.schemes[i].locked ? QColor(255, 200, 80)
-                                                  : QColor(220, 220, 220);
+            c.labelColor = proj.schemes[realIdx].locked ? QColor(255, 200, 80)
+                                                        : QColor(220, 220, 220);
             c.labelY = cellLabelY(cellW, cellH);
         }
-        if (c.highlighted) {
+        if (c.highlighted && !m_renderingForGif) {
             const QPoint tip = cellTriTip(cellW, cellH);
             // 把"三角顶点位置"作为 kpoint 传, FrameRenderer 直接用 (不再 +50).
             c.kpointX = tip.x();

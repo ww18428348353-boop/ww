@@ -8,6 +8,7 @@
 class QListWidget;
 class QListWidgetItem;
 class QAction;
+class QMenu;
 
 namespace HighPro {
 
@@ -17,7 +18,7 @@ class LutBaker;
 // 方案画廊 dock 内容:
 //   - 显示 64×80 缩略图 + 名字
 //   - 点击切换 currentSchemeIndex; 点击空白 → -1 (无选中)
-//   - 双击重命名; 右键: 复制 / 删除 / 重命名
+//   - 双击重命名; 右键: 复制 / 删除 / 重命名 / ❤️细化方案 / 🔷配色方案转移
 //   - 缩略图后台烘焙 (ThumbnailWorker), 主线只调度
 class SchemePanel : public QWidget
 {
@@ -38,6 +39,11 @@ private:
     void requestThumbnail(int schemeIdx);
     void requestAllThumbnails();
     void initThumbnailSource();          // projectLoaded 时把 body 第一帧 → worker
+
+    // ❤️细化方案: 打开独立弹窗, 已烘焙先确认降级
+    void openRefineDialog(int schemeIdx);
+    // 🔷配色方案转移: 构造 [分组 → 目标方案 ID] 两级子菜单, 挂到 parentMenu 下
+    QMenu* buildTransferMenu(int sourceSchemeIdx, QMenu* parentMenu);
 
     QListWidget* m_list{ nullptr };
     bool         m_blockEditEmit = false;

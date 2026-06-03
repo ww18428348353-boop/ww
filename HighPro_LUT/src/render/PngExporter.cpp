@@ -170,4 +170,33 @@ PngExporter::Result PngExporter::exportAllSchemes(const Project& project,
     return r;
 }
 
+PngExporter::Result PngExporter::exportLockedSchemes(const Project& project,
+                                                    LutBaker& baker,
+                                                    const QString& outputRootIn)
+{
+    Result r;
+    if (!baker.isReady()) { r.lastError = "LutBaker 未就绪"; return r; }
+    QString outRoot = outputRootIn.isEmpty() ? project.outputRoot : outputRootIn;
+    if (outRoot.isEmpty()) { r.lastError = "未设置输出目录"; return r; }
+
+    int locked = 0;
+    for (int i = 1; i < project.schemes.size(); ++i) {
+        if (project.schemes[i].locked) ++locked;
+    }
+    if (locked == 0) {
+        r.lastError = "没有锁定的方案 (右键方案 → 🔒 锁定后再试)";
+        return r;
+    }
+
+    for (int i = 1; i < project.schemes.size(); ++i) {
+        if (!project.schemes[i].locked) continue;
+        QString err;
+        if (!exportOneScheme(project, project.schemes[i], i, outRoot, baker, r, &err)) {
+            r.lastError = QString("[方案 #%1] %2").arg(i).arg(err);
+            return r;
+        }
+    }
+    return r;
+}
+
 } // namespace HighPro

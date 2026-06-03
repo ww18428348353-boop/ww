@@ -116,6 +116,7 @@ bool ProjectController::loadSource(const QString& sourceRoot, QString* errorOut)
 
     m_dirty = false;        // 新加载源目录 → 视为干净状态 (含自动导入的 add_lut 方案)
     m_currentProjectPath.clear();   // 没有对应工程文件
+    clearUndo();                    // 新源 → 旧 undo/redo 失效
 
     emit projectLoaded();
     emit actionChanged();
@@ -193,6 +194,7 @@ bool ProjectController::loadProject(const QString& path, QJsonObject* outUiState
 
     m_currentProjectPath = path;
     m_dirty = false;        // 加载完是干净状态
+    clearUndo();            // 加载新工程 → 旧 undo/redo 失效
     if (outUiState) *outUiState = ui;
 
     emit projectLoaded();
@@ -342,12 +344,19 @@ void ProjectController::notifyEffectsChanged()
     emit effectsChanged();
 }
 
+void ProjectController::emitPreviewRefresh()
+{
+    // 不动 m_dirty, 也不 emit schemesChanged (避免缩略图 N 次重烘).
+    emit effectsChanged();
+}
+
 void ProjectController::resetCurrentLayerEffects()
 {
     const QString& k = m_project.currentLayerKey;
     if (k.isEmpty()) return;
     auto* sc = m_project.currentScheme();
     if (!sc || sc->isBuiltin) return;
+    pushUndoSnapshot(QStringLiteral("重置当前层效果"));
     sc->layerEffects[k].reset();
     m_dirty = true;
     emit effectsChanged();
@@ -357,6 +366,7 @@ void ProjectController::resetAllLayerEffects()
 {
     auto* sc = m_project.currentScheme();
     if (!sc || sc->isBuiltin) return;
+    pushUndoSnapshot(QStringLiteral("重置所有层效果"));
     for (const auto& l : m_project.layers) {
         sc->layerEffects[l.key()].reset();
     }
@@ -366,6 +376,8 @@ void ProjectController::resetAllLayerEffects()
 
 void ProjectController::resetAllSchemesEffects(bool includeBaked)
 {
+    pushUndoSnapshot(includeBaked ? QStringLiteral("重置全部方案")
+                                  : QStringLiteral("重置可编辑方案"));
     int processed = 0;
     bool tagsChanged = false;
     for (int i = 0; i < m_project.schemes.size(); ++i) {
@@ -401,6 +413,7 @@ void ProjectController::copyCurrentLayerEffectsToAll()
     if (!sc || sc->isBuiltin) return;
     auto it = sc->layerEffects.find(k);
     if (it == sc->layerEffects.end()) return;
+    pushUndoSnapshot(QStringLiteral("复制当前层到所有层"));
     EffectStack src = it.value();
     for (const auto& l : m_project.layers) {
         sc->layerEffects[l.key()] = src;
@@ -417,6 +430,7 @@ void ProjectController::randomizeCurrentLayer()
     if (sc->locked) return;     // 🔒 锁住的方案不参与变色
     const QString& k = m_project.currentLayerKey;
     if (k.isEmpty()) return;
+    pushUndoSnapshot(QStringLiteral("随机当前层"));
     randomizeStack(sc->layerEffects[k]);
     m_dirty = true;
     emit effectsChanged();
@@ -427,6 +441,7 @@ void ProjectController::randomizeAllLayers(bool sameSeedAllLayers)
     auto* sc = m_project.currentScheme();
     if (!sc || sc->isBuiltin) return;
     if (sc->locked) return;     // 🔒 锁住的方案不参与变色
+    pushUndoSnapshot(QStringLiteral("随机所有层"));
 
     // sameSeedAllLayers=true  → 各层用同一种子, 整套配色"协调统一" (色相中心一致)
     // sameSeedAllLayers=false → 每层独立种子, 各层完全独立的随机效果 (默认行为)
@@ -446,6 +461,8 @@ void ProjectController::randomizeAllLayers(bool sameSeedAllLayers)
 
 void ProjectController::randomizeAllSchemes(bool includeBaked)
 {
+    pushUndoSnapshot(includeBaked ? QStringLiteral("随机全部方案")
+                                  : QStringLiteral("随机可编辑方案"));
     int processed = 0;
     bool anyTagChange = false;
     QString currentName;
@@ -556,6 +573,7 @@ void ProjectController::setCurrentSchemeIndex(int i)
 
 int ProjectController::addScheme(const QString& name)
 {
+    pushUndoSnapshot(QStringLiteral("新建方案"));
     Scheme s;
     s.isBuiltin = false;
     s.isBaked   = false;
@@ -577,6 +595,7 @@ int ProjectController::addScheme(const QString& name)
 bool ProjectController::removeScheme(int idx)
 {
     if (idx <= 0 || idx >= m_project.schemes.size()) return false; // 本体不可删
+    pushUndoSnapshot(QStringLiteral("删除方案"));
     m_project.schemes.removeAt(idx);
     m_dirty = true;
     if (m_project.currentSchemeIndex >= m_project.schemes.size()) {
@@ -592,6 +611,7 @@ void ProjectController::renameScheme(int idx, const QString& name)
 {
     if (idx < 0 || idx >= m_project.schemes.size()) return;
     if (m_project.schemes[idx].name == name) return;
+    pushUndoSnapshot(QStringLiteral("重命名方案"));
     m_project.schemes[idx].name = name;
     m_dirty = true;
     emit schemesChanged();
@@ -609,9 +629,247 @@ void ProjectController::setSchemeLocked(int idx, bool locked)
     Scheme& sc = m_project.schemes[idx];
     if (sc.isBuiltin) return;          // 本体不锁
     if (sc.locked == locked) return;
+    pushUndoSnapshot(locked ? QStringLiteral("锁定方案") : QStringLiteral("解锁方案"));
     sc.locked = locked;
     m_dirty = true;
     emit schemesChanged();
+}
+
+// ===========================================================================
+// Undo / Redo 栈 (简易快照)
+// ===========================================================================
+
+ProjectController::UndoSnapshot ProjectController::captureSnapshot(const QString& label) const
+{
+    UndoSnapshot s;
+    s.label = label;
+    s.schemes = m_project.schemes;
+    s.currentSchemeIndex = m_project.currentSchemeIndex;
+    return s;
+}
+
+void ProjectController::restoreSnapshot(const UndoSnapshot& s)
+{
+    m_project.schemes = s.schemes;
+    m_project.currentSchemeIndex = s.currentSchemeIndex;
+}
+
+void ProjectController::pushUndoSnapshot(const QString& label)
+{
+    m_undoStack.push_back(captureSnapshot(label));
+    while (m_undoStack.size() > kUndoLimit) m_undoStack.removeFirst();
+    // 任何新操作 → redo 链失效 (避免歧义状态)
+    m_redoStack.clear();
+}
+
+void ProjectController::undo()
+{
+    if (m_undoStack.isEmpty()) return;
+    UndoSnapshot prev = m_undoStack.takeLast();
+    // 当前态进 redo 栈, 标签沿用同一个 (用户语义: undo 后 redo 回到原状态)
+    UndoSnapshot cur = captureSnapshot(prev.label);
+    m_redoStack.push_back(std::move(cur));
+    while (m_redoStack.size() > kUndoLimit) m_redoStack.removeFirst();
+
+    restoreSnapshot(prev);
+    m_dirty = true;
+    emit schemesChanged();
+    emit currentSchemeChanged();
+    emit effectsChanged();
+}
+
+void ProjectController::redo()
+{
+    if (m_redoStack.isEmpty()) return;
+    UndoSnapshot next = m_redoStack.takeLast();
+    // 当前态进 undo (恢复 redo 之前的状态以便再 Ctrl+Z)
+    m_undoStack.push_back(captureSnapshot(next.label));
+    while (m_undoStack.size() > kUndoLimit) m_undoStack.removeFirst();
+
+    restoreSnapshot(next);
+    m_dirty = true;
+    emit schemesChanged();
+    emit currentSchemeChanged();
+    emit effectsChanged();
+}
+
+// ===========================================================================
+// 方案画廊新增: 细化方案 / 配色方案转移
+// ===========================================================================
+
+bool ProjectController::ensureSchemeEditable(int schemeIdx,
+                                             bool allowConvertBaked,
+                                             QString* errorOut)
+{
+    if (schemeIdx < 0 || schemeIdx >= m_project.schemes.size()) {
+        if (errorOut) *errorOut = QStringLiteral("方案索引非法");
+        return false;
+    }
+    Scheme& sc = m_project.schemes[schemeIdx];
+    if (sc.isBuiltin) {
+        if (errorOut) *errorOut = QStringLiteral("本体方案不可编辑");
+        return false;
+    }
+    if (!sc.isBaked) return true;     // 已是可编辑
+
+    if (!allowConvertBaked) {
+        if (errorOut) *errorOut = QStringLiteral("已烘焙方案需要确认降级");
+        return false;
+    }
+
+    // 降级: 清空 add_lut 引用, 补齐每层空 EffectStack
+    sc.isBaked = false;
+    sc.layerLutPath.clear();
+    for (const auto& l : m_project.layers) {
+        if (!sc.layerEffects.contains(l.key())) {
+            sc.layerEffects.insert(l.key(), EffectStack{});
+        }
+    }
+    m_dirty = true;
+    emit schemesChanged();
+    return true;
+}
+
+bool ProjectController::applyRefinedLayerEffects(int schemeIdx,
+                                                 const QHash<QString, EffectStack>& refinedEffects,
+                                                 QString* errorOut)
+{
+    if (schemeIdx < 0 || schemeIdx >= m_project.schemes.size()) {
+        if (errorOut) *errorOut = QStringLiteral("方案索引非法");
+        return false;
+    }
+    Scheme& sc = m_project.schemes[schemeIdx];
+    if (sc.isBuiltin) {
+        if (errorOut) *errorOut = QStringLiteral("本体方案不可写入效果");
+        return false;
+    }
+    if (sc.isBaked) {
+        if (errorOut) *errorOut = QStringLiteral("已烘焙方案需要先降级再写入");
+        return false;
+    }
+
+    // 收集有效 layerKey 集合 (project.layers 提供)
+    QSet<QString> validKeys;
+    for (const auto& l : m_project.layers) validKeys.insert(l.key());
+
+    // 先快照, 再写入 (失败也保留快照, 用户可 Ctrl+Z 回滚)
+    pushUndoSnapshot(QStringLiteral("细化方案保存"));
+
+    int written = 0;
+    for (auto it = refinedEffects.constBegin(); it != refinedEffects.constEnd(); ++it) {
+        if (!validKeys.contains(it.key())) continue;
+        sc.layerEffects[it.key()] = it.value();
+        ++written;
+    }
+    if (written == 0) {
+        if (errorOut) *errorOut = QStringLiteral("没有可写入的层");
+        // 没改东西, 撤回这一次快照避免污染栈
+        if (!m_undoStack.isEmpty()) m_undoStack.removeLast();
+        return false;
+    }
+    m_dirty = true;
+    emit effectsChanged();
+    emit schemesChanged();      // 缩略图栏需要重烘
+    return true;
+}
+
+bool ProjectController::transferSchemeColorGroup(int sourceSchemeIdx,
+                                                 int targetSchemeIdx,
+                                                 const QString& groupKey,
+                                                 QString* errorOut)
+{
+    if (sourceSchemeIdx == targetSchemeIdx) return true; // 同方案, 无操作
+    if (sourceSchemeIdx < 0 || sourceSchemeIdx >= m_project.schemes.size()
+     || targetSchemeIdx < 0 || targetSchemeIdx >= m_project.schemes.size()) {
+        if (errorOut) *errorOut = QStringLiteral("方案索引非法");
+        return false;
+    }
+    Scheme& src = m_project.schemes[sourceSchemeIdx];
+    Scheme& dst = m_project.schemes[targetSchemeIdx];
+    if (src.isBuiltin || dst.isBuiltin) {
+        if (errorOut) *errorOut = QStringLiteral("本体方案不可作为源或目标");
+        return false;
+    }
+
+    // 解析 groupKey → 实际要复制的 layer key 列表
+    QStringList layerKeys;
+    if (groupKey == QStringLiteral("body")) {
+        for (const auto& l : m_project.layers) {
+            if (l.kind == LayerKind::Body) layerKeys << l.key();
+        }
+    } else if (groupKey == QStringLiteral("addon")) {
+        for (const auto& l : m_project.layers) {
+            if (l.kind == LayerKind::Addon) layerKeys << l.key();
+        }
+    } else if (groupKey.startsWith(QStringLiteral("num:"))) {
+        const QString numStr = groupKey.mid(4);
+        bool ok = false;
+        const int n = numStr.toInt(&ok);
+        if (!ok) {
+            if (errorOut) *errorOut = QStringLiteral("分组数字解析失败: %1").arg(groupKey);
+            return false;
+        }
+        for (const auto& l : m_project.layers) {
+            if (l.kind == LayerKind::Numbered && l.numberedIdx == n) layerKeys << l.key();
+        }
+    } else {
+        if (errorOut) *errorOut = QStringLiteral("未识别的分组: %1").arg(groupKey);
+        return false;
+    }
+
+    if (layerKeys.isEmpty()) {
+        if (errorOut) *errorOut = QStringLiteral("分组 [%1] 在当前资源树下没有对应层").arg(groupKey);
+        return false;
+    }
+
+    // 早期拒绝 "已烘焙 → 可编辑" 这条不支持的路径, 不进栈
+    if (src.isBaked && !dst.isBaked) {
+        if (errorOut) *errorOut = QStringLiteral(
+            "已烘焙方案不能转移到可编辑方案 (源是 PNG LUT, 不能反推效果参数)");
+        return false;
+    }
+
+    pushUndoSnapshot(QStringLiteral("配色方案转移"));
+
+    // 按 4 种组合落地
+    const bool srcBaked = src.isBaked;
+    const bool dstBaked = dst.isBaked;
+
+    if (!srcBaked && !dstBaked) {
+        // 可编辑 → 可编辑: 复制 EffectStack
+        for (const QString& k : layerKeys) {
+            auto it = src.layerEffects.find(k);
+            if (it == src.layerEffects.end()) {
+                dst.layerEffects[k] = EffectStack{};
+            } else {
+                dst.layerEffects[k] = it.value();
+            }
+        }
+    } else if (!srcBaked && dstBaked) {
+        // 可编辑 → 已烘焙: 目标降级后复制
+        if (!ensureSchemeEditable(targetSchemeIdx, true, errorOut)) return false;
+        for (const QString& k : layerKeys) {
+            auto it = src.layerEffects.find(k);
+            if (it == src.layerEffects.end()) {
+                dst.layerEffects[k] = EffectStack{};
+            } else {
+                dst.layerEffects[k] = it.value();
+            }
+        }
+    } else if (srcBaked && dstBaked) {
+        // 已烘焙 → 已烘焙: 复制 layerLutPath
+        for (const QString& k : layerKeys) {
+            const QString p = src.layerLutPath.value(k);
+            if (p.isEmpty()) dst.layerLutPath.remove(k);
+            else             dst.layerLutPath.insert(k, p);
+        }
+    }
+    // (srcBaked && !dstBaked) 已在 push 前拦截, 不会到这里.
+
+    m_dirty = true;
+    emit effectsChanged();
+    emit schemesChanged();
+    return true;
 }
 
 // ===========================================================================
@@ -647,6 +905,7 @@ void ProjectController::smartRandomizeCurrentLayer()
     // Skin 跳过 (与 randomizeStackBySlot Skin 分支等价, 但提前 short-circuit)
     if (m_project.isSkinSafe(*layer)) return;
 
+    pushUndoSnapshot(QStringLiteral("智能随机当前层"));
     const SchemePalette& palette = ensurePaletteForScheme(m_project.currentSchemeIndex);
     const LayerSlot slot = m_project.slotFor(*layer);
 
@@ -661,6 +920,7 @@ void ProjectController::smartRandomizeAllLayers()
     if (!sc || sc->isBuiltin) return;
     if (sc->locked) return;
 
+    pushUndoSnapshot(QStringLiteral("智能随机所有层"));
     // 强制重生 palette: "智能所有层 = 换一套完整配色"
     sc->palette = generatePalette(m_project.currentSchemeIndex,
                                    QRandomGenerator::global()->generate());
@@ -679,6 +939,8 @@ void ProjectController::smartRandomizeAllLayers()
 
 void ProjectController::smartRandomizeAllSchemes(bool includeBaked)
 {
+    pushUndoSnapshot(includeBaked ? QStringLiteral("智能随机全部方案")
+                                  : QStringLiteral("智能随机可编辑方案"));
     int processed = 0;
     bool anyTagChange = false;
 
@@ -866,6 +1128,8 @@ void blendStack(const EffectStack& smart, const EffectStack& legacy, EffectStack
 
 void ProjectController::mixRandomizeAllSchemes(bool includeBaked)
 {
+    pushUndoSnapshot(includeBaked ? QStringLiteral("智能+随机 全部方案")
+                                  : QStringLiteral("智能+随机 可编辑方案"));
     int processed = 0;
     bool anyTagChange = false;
 

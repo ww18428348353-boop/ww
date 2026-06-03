@@ -55,6 +55,9 @@ public:
 
     // 编辑器修改 effects 后调此一致刷新预览
     void notifyEffectsChanged();
+    // 仅触发画布刷新, 不标 dirty / 不改 schemesChanged. 用于细化弹窗实时预览这类
+    // "用户尚未提交" 的中间态. 调用方负责后续保存或回滚.
+    void emitPreviewRefresh();
     void resetCurrentLayerEffects();
     void resetAllLayerEffects();             // 当前方案下所有层重置
     void copyCurrentLayerEffectsToAll();
@@ -110,6 +113,58 @@ public:
     bool isSchemeLocked(int idx) const;
     void setSchemeLocked(int idx, bool locked);
 
+    // === 方案画廊新增: 细化方案 / 配色方案转移 ===
+    //
+    // 打开细化弹窗前确保目标方案可编辑.
+    //   - 本体方案 (isBuiltin)        → 返回 false, errorOut 写入原因
+    //   - 已烘焙方案 (isBaked)        → 若 allowConvertBaked=true 则降级为可编辑 (清空 layerLutPath),
+    //                                  否则返回 false
+    //   - 可编辑方案                  → 直接返回 true (不动)
+    // 降级时会自动为缺失的层补 EffectStack{} 占位; 成功降级后 schemesChanged 信号发出.
+    bool ensureSchemeEditable(int schemeIdx, bool allowConvertBaked, QString* errorOut = nullptr);
+
+    // 保存细化弹窗的修改: 把 refinedEffects 写回方案对应层的 EffectStack.
+    //   只允许写已存在于 project.layers 的 layerKey, 未知 key 会被忽略.
+    //   写完发 effectsChanged / schemesChanged, 标 dirty.
+    bool applyRefinedLayerEffects(int schemeIdx,
+                                  const QHash<QString, EffectStack>& refinedEffects,
+                                  QString* errorOut = nullptr);
+
+    // 把源方案某分组的配色数据复制到目标方案对应层.
+    //
+    // groupKey 取值:
+    //   "body"        → body 层
+    //   "num:00".."num:NN" → 指定 numberedIdx 的数字层
+    //   "addon"       → 所有 addon 子层
+    //
+    // 规则:
+    //   - 源 / 目标都是可编辑 (isBaked=false): 复制 layerEffects
+    //   - 源可编辑, 目标已烘焙: 目标降级为可编辑后复制
+    //   - 源已烘焙, 目标已烘焙: 复制 layerLutPath
+    //   - 源已烘焙, 目标可编辑: 不支持, 返回 false
+    //   - 任一方是本体: 返回 false
+    //   - 源 == 目标: 直接返回 true (无操作)
+    bool transferSchemeColorGroup(int sourceSchemeIdx,
+                                  int targetSchemeIdx,
+                                  const QString& groupKey,
+                                  QString* errorOut = nullptr);
+
+    // === Undo / Redo 栈 (Ctrl+Z / Ctrl+Y) ===
+    //
+    // 简易快照式 undo: 适用于"批量级"操作 (添加/删除/复制/重命名/锁定/随机/重置/细化保存/转移).
+    // EffectPanel 单滑块拖动不入栈, 但拖动结束 (鼠标释放 / spin 提交) 时各压一次, 见 EffectPanel.
+    //
+    // 栈深度默认 50; 超过 FIFO 抛弃最旧.
+    // pushUndoSnapshot 自动清空 redo 栈 (任何新操作都使重做链失效).
+    void pushUndoSnapshot(const QString& label);   // 操作前调; 失败也安全
+    bool canUndo() const { return !m_undoStack.isEmpty(); }
+    bool canRedo() const { return !m_redoStack.isEmpty(); }
+    QString topUndoLabel() const { return m_undoStack.isEmpty() ? QString() : m_undoStack.last().label; }
+    QString topRedoLabel() const { return m_redoStack.isEmpty() ? QString() : m_redoStack.last().label; }
+    void undo();                                    // 弹 undo + 把当前态进 redo + 还原
+    void redo();                                    // 弹 redo + 把当前态进 undo + 还原
+    void clearUndo() { m_undoStack.clear(); m_redoStack.clear(); }
+
 signals:
     void projectLoaded();
     void actionChanged();
@@ -128,6 +183,21 @@ private:
     // P0: 确保方案 palette 已生成 (按方案 idx 选风格), 返回引用.
     // 仅供 smart* 方法内部使用. 不会发信号 / 标 dirty (由调用方负责).
     SchemePalette& ensurePaletteForScheme(int schemeIdx);
+
+    // Undo 栈条目: 快照足以还原所有方案级状态.
+    struct UndoSnapshot {
+        QString          label;
+        QVector<Scheme>  schemes;
+        int              currentSchemeIndex;
+    };
+    QVector<UndoSnapshot> m_undoStack;
+    QVector<UndoSnapshot> m_redoStack;
+    static constexpr int  kUndoLimit = 50;
+
+    // 内部: 把当前 project 状态打包成快照 (供 undo/redo 互转用)
+    UndoSnapshot captureSnapshot(const QString& label) const;
+    // 内部: 把快照写回 project (不发信号), 由调用方发
+    void restoreSnapshot(const UndoSnapshot& s);
 
     Project m_project;
     QString m_currentProjectPath;     // M8: 最近 saveProject/loadProject 的路径

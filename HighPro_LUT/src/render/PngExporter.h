@@ -38,6 +38,12 @@ public:
     static Result exportAllSchemes(const Project& project,
                                    LutBaker& baker,
                                    const QString& outputRoot = QString());
+
+    // 仅导出 locked=true 的方案. 本体永远跳过. 没有任何锁定方案时
+    // result.lastError = "没有锁定的方案".
+    static Result exportLockedSchemes(const Project& project,
+                                      LutBaker& baker,
+                                      const QString& outputRoot = QString());
 };
 
 } // namespace HighPro

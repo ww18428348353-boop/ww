@@ -1,9 +1,11 @@
 #include "SchemePanel.h"
+#include "SchemeRefineDialog.h"
 #include "app/ProjectController.h"
 #include "app/ThumbnailWorker.h"
 #include "render/LutBaker.h"
 #include "core/PathUtil.h"
 #include "core/HaldClut.h"
+#include "core/LayerData.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -14,11 +16,16 @@
 #include <QKeyEvent>
 #include <QMenu>
 #include <QInputDialog>
+#include <QMessageBox>
 #include <QFile>
 #include <QImageReader>
 #include <QPainter>
 #include <QPushButton>
+#include <QApplication>
+#include <QContextMenuEvent>
+#include <QScrollBar>
 #include <QRegularExpression>
+#include <QSet>
 #include <array>
 
 // stb_image 解 TGA (实现已在 D3D11Texture.cpp 里 STB_IMAGE_IMPLEMENTATION)
@@ -63,6 +70,61 @@ protected:
         }
         QListWidget::keyPressEvent(e);
     }
+};
+
+// 行 overlay 容器:
+//   - 整行 setItemWidget 用. 自身布局把 🔒 按钮 push 到右侧.
+//   - 中间空白区被点击时, 把鼠标事件"转发"给 QListWidget 的 viewport, 让 list 正常
+//     处理选中 / 双击 (= 重命名). 锁按钮在 widget 子层级, 由 Qt 优先 hit-test, 不影响.
+//   - 不用 WA_TransparentForMouseEvents (那会让子按钮一同失效).
+class RowContainer : public QWidget
+{
+public:
+    explicit RowContainer(QListWidget* list, QListWidgetItem* item)
+        : QWidget(list->viewport()), m_list(list), m_item(item) {}
+
+protected:
+    void mousePressEvent(QMouseEvent* e) override {
+        if (forwardToList(e)) e->accept();
+        else QWidget::mousePressEvent(e);
+    }
+    void mouseReleaseEvent(QMouseEvent* e) override {
+        if (forwardToList(e)) e->accept();
+        else QWidget::mouseReleaseEvent(e);
+    }
+    void mouseDoubleClickEvent(QMouseEvent* e) override {
+        // 把双击事件直送 list, list 会发 itemDoubleClicked 信号 → 弹改名对话框
+        if (!m_list || !m_item) { QWidget::mouseDoubleClickEvent(e); return; }
+        if (e->button() == Qt::LeftButton) {
+            // 选中行 (确保 currentRow 同步) 后, 主动发 itemDoubleClicked
+            m_list->setCurrentItem(m_item);
+            emit static_cast<QListWidget*>(m_list)->itemDoubleClicked(m_item);
+            e->accept();
+            return;
+        }
+        QWidget::mouseDoubleClickEvent(e);
+    }
+    void contextMenuEvent(QContextMenuEvent* e) override {
+        // 右键 → 让 list 走 customContextMenuRequested
+        if (m_list) {
+            const QPoint inList = m_list->viewport()->mapFromGlobal(e->globalPos());
+            QContextMenuEvent fwd(e->reason(), inList, e->globalPos(), e->modifiers());
+            QApplication::sendEvent(m_list->viewport(), &fwd);
+            e->accept();
+            return;
+        }
+        QWidget::contextMenuEvent(e);
+    }
+
+private:
+    bool forwardToList(QMouseEvent* e) {
+        if (!m_list || !m_item) return false;
+        // 选中本行 (即使空白区也算选中, 与 QListWidget 默认一致)
+        m_list->setCurrentItem(m_item);
+        return true;
+    }
+    QListWidget*     m_list = nullptr;
+    QListWidgetItem* m_item = nullptr;
 };
 
 // 取 body 第 0 方向 第 0 帧 路径 (如不存在用 layers[0] 第一可用帧).
@@ -276,7 +338,11 @@ void SchemePanel::rebuild()
 
         // 行尾嵌入 🔒 按钮 (本体/已烘焙不挂)
         if (!proj.schemes[i].isBuiltin) {
-            auto* container = new QWidget(m_list);
+            auto* container = new RowContainer(m_list, it);
+            // container 高度严格匹配 sizeHint, 否则 setItemWidget 会让 item 可视高度按
+            // widget 自身 sizeHint 计算 → 与 sizeHint(0, kThumbH+6) 不一致 → 滚动/高亮错位
+            // (复现: 选 25/26/27 高亮显示到 22/23/24).
+            container->setFixedHeight(ThumbnailWorker::kThumbH + 6);
             auto* lay = new QHBoxLayout(container);
             lay->setContentsMargins(0, 0, 8, 0);
             lay->addStretch(1);
@@ -306,12 +372,20 @@ void SchemePanel::rebuild()
             m_list->setItemWidget(it, container);
         }
     }
+    // setCurrentRow 默认 autoScroll 会强制把选中行滚到可见区 (含居中),
+    // 用户选 27 时画廊会跳到 "3~27" 区段, 但用户希望看到的是 "0~24"
+    // (= 屏幕没动) — 所以这里临时关 autoScroll, 同时保留 scrollbar 位置.
+    const int savedScroll = m_list->verticalScrollBar()->value();
+    const bool savedAutoScroll = m_list->hasAutoScroll();
+    m_list->setAutoScroll(false);
     if (proj.currentSchemeIndex >= 0 && proj.currentSchemeIndex < proj.schemes.size()) {
         m_list->setCurrentRow(proj.currentSchemeIndex);
     } else {
         m_list->setCurrentRow(-1);
         m_list->clearSelection();
     }
+    m_list->verticalScrollBar()->setValue(savedScroll);
+    m_list->setAutoScroll(savedAutoScroll);
 }
 
 void SchemePanel::onCurrentRowChanged(int row)
@@ -329,10 +403,33 @@ void SchemePanel::onCurrentRowChanged(int row)
 
 void SchemePanel::onItemDoubleClicked(QListWidgetItem* item)
 {
+    // 注意: 整行上挂了 🔒 按钮 (setItemWidget), QListWidget 默认的 editItem
+    //       因 widget 覆盖文本区会失效. 这里直接弹对话框收名字.
     if (!item) return;
-    if (item->flags() & Qt::ItemIsEditable) {
-        m_list->editItem(item);
-    }
+    if (!(item->flags() & Qt::ItemIsEditable)) return;     // 本体不可改名
+    int row = m_list->row(item);
+    auto& ctl = ProjectController::instance();
+    if (row < 0 || row >= ctl.schemeCount()) return;
+    const auto& sc = ctl.project().schemes[row];
+
+    // 用户输入: 只让 ta 改 "方案 N - " 之后的后缀部分, 前缀强制保留 (与 onItemChanged 一致)
+    const QString prefix = QString("方案 %1 - ").arg(row);
+    QString currentName = sc.name;
+    QString currentSuffix = currentName.startsWith(prefix)
+        ? currentName.mid(prefix.size())
+        : currentName;
+    bool ok = false;
+    QString suffix = QInputDialog::getText(this,
+        QStringLiteral("重命名方案"),
+        QStringLiteral("方案名 (前缀 [%1] 自动保留):").arg(prefix.trimmed()),
+        QLineEdit::Normal, currentSuffix, &ok);
+    if (!ok) return;
+    suffix = suffix.trimmed();
+    if (suffix.isEmpty()) return;
+    // 剥可能残留的"方案 X -" 模式 (用户复制粘贴时)
+    QRegularExpression re("^方案\\s*\\d+\\s*-\\s*");
+    suffix.remove(re);
+    ctl.renameScheme(row, prefix + suffix);
 }
 
 void SchemePanel::onItemChanged(QListWidgetItem* item)
@@ -383,11 +480,29 @@ void SchemePanel::onContextMenu(const QPoint& pos)
     menu.addSeparator();
     bool hasRow = (row >= 0 && row < proj.schemes.size());
     bool isBuiltin = hasRow && proj.schemes[row].isBuiltin;
+    bool isBaked   = hasRow && proj.schemes[row].isBaked;
     bool currLocked = hasRow && proj.schemes[row].locked;
     auto* aLock = menu.addAction(currLocked
         ? QStringLiteral("🔓 解锁此方案")
         : QStringLiteral("🔒 锁定此方案 (随机变色将跳过)"));
     aLock->setEnabled(hasRow && !isBuiltin);
+    menu.addSeparator();
+    // ❤️细化方案: 本体禁用; 已烘焙允许 (打开时确认降级)
+    auto* aRefine = menu.addAction(QStringLiteral("❤️ 细化方案"));
+    aRefine->setEnabled(hasRow && !isBuiltin);
+    // 🔷配色方案转移: 子菜单 (本体禁用); 子菜单内容动态构造
+    QMenu* transferMenu = nullptr;
+    if (hasRow && !isBuiltin) {
+        transferMenu = buildTransferMenu(row, &menu);
+    }
+    QAction* aTransferPlaceholder = nullptr;
+    if (transferMenu) {
+        transferMenu->setTitle(QStringLiteral("🔷 配色方案转移"));
+        menu.addMenu(transferMenu);
+    } else {
+        aTransferPlaceholder = menu.addAction(QStringLiteral("🔷 配色方案转移"));
+        aTransferPlaceholder->setEnabled(false);
+    }
     menu.addSeparator();
     auto* aDel    = menu.addAction(QStringLiteral("删除"));
 
@@ -398,7 +513,7 @@ void SchemePanel::onContextMenu(const QPoint& pos)
     QAction* sel = menu.exec(m_list->mapToGlobal(pos));
     if (!sel) return;
     if (sel == aRename) {
-        if (hasRow) m_list->editItem(it);
+        if (hasRow) onItemDoubleClicked(it);    // 复用同一段对话框逻辑
     } else if (sel == aDup) {
         if (!hasRow) return;
         // 复制: 新建一个空方案, 拷 effects (本体复制 = 新空方案)
@@ -410,9 +525,121 @@ void SchemePanel::onContextMenu(const QPoint& pos)
         ctl.setCurrentSchemeIndex(newIdx);
     } else if (sel == aLock) {
         if (hasRow && !isBuiltin) ctl.setSchemeLocked(row, !currLocked);
+    } else if (sel == aRefine) {
+        if (hasRow && !isBuiltin) openRefineDialog(row);
     } else if (sel == aDel) {
         if (hasRow) ctl.removeScheme(row);
     }
+    // 转移子菜单选项: 走自己的 lambda, 不进 if-else 链
+    (void)isBaked;
+}
+
+void SchemePanel::openRefineDialog(int schemeIdx)
+{
+    auto& ctl = ProjectController::instance();
+    const auto& proj = ctl.project();
+    if (schemeIdx < 0 || schemeIdx >= proj.schemes.size()) return;
+    const auto& sc = proj.schemes[schemeIdx];
+    if (sc.isBuiltin) return;
+
+    // 已烘焙方案需要先确认降级
+    if (sc.isBaked) {
+        auto rc = QMessageBox::question(this,
+            QStringLiteral("细化方案"),
+            QStringLiteral("方案 [%1] 当前为已烘焙状态.\n"
+                           "继续细化会把它降级为可编辑方案, 原 add_lut PNG 引用会丢失.\n继续?")
+                .arg(sc.name),
+            QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel);
+        if (rc != QMessageBox::Ok) return;
+        QString err;
+        if (!ctl.ensureSchemeEditable(schemeIdx, true, &err)) {
+            QMessageBox::warning(this, QStringLiteral("细化方案"),
+                QStringLiteral("降级失败: %1").arg(err.isEmpty() ? QStringLiteral("未知错误") : err));
+            return;
+        }
+    }
+
+    SchemeRefineDialog dlg(schemeIdx, this);
+    dlg.exec();
+}
+
+QMenu* SchemePanel::buildTransferMenu(int sourceSchemeIdx, QMenu* parentMenu)
+{
+    auto& ctl = ProjectController::instance();
+    const auto& proj = ctl.project();
+    if (sourceSchemeIdx < 0 || sourceSchemeIdx >= proj.schemes.size()) return nullptr;
+
+    // 收集源方案"有内容"的分组 — 本体/缺失层 不显示
+    //   body         → 当 layers 含 Body
+    //   num:NN       → 当 layers 含 Numbered 且 numberedIdx==NN
+    //   addon        → 当 layers 至少 1 个 Addon
+    QSet<int>  numberedSet;
+    bool hasBody = false, hasAddon = false;
+    for (const auto& l : proj.layers) {
+        if (l.kind == LayerKind::Body)  hasBody = true;
+        if (l.kind == LayerKind::Addon) hasAddon = true;
+        if (l.kind == LayerKind::Numbered) numberedSet.insert(l.numberedIdx);
+    }
+    if (!hasBody && !hasAddon && numberedSet.isEmpty()) return nullptr;
+
+    auto* root = new QMenu(parentMenu);
+
+    // 构 [groupKey, displayName] 列表, 顺序: addon → num(升序) → body
+    // (与截图二一致: 先列 addon, 数字层中间, body 最后)
+    struct GroupEntry { QString key; QString display; };
+    QVector<GroupEntry> groups;
+    if (hasAddon)   groups.push_back({ QStringLiteral("addon"), QStringLiteral("addon") });
+    QList<int> nums = numberedSet.values();
+    std::sort(nums.begin(), nums.end());
+    for (int n : nums) {
+        groups.push_back({
+            QString("num:%1").arg(n, 2, 10, QChar('0')),
+            QString("%1").arg(n, 2, 10, QChar('0')),
+        });
+    }
+    if (hasBody)    groups.push_back({ QStringLiteral("body"), QStringLiteral("body") });
+
+    for (const auto& g : groups) {
+        QMenu* gMenu = root->addMenu(g.display);
+        // 子菜单: 列出所有 (非本体, 非源自身) 方案 ID
+        bool anyTarget = false;
+        for (int i = 0; i < proj.schemes.size(); ++i) {
+            const auto& sc = proj.schemes[i];
+            if (sc.isBuiltin) continue;        // 不允许写本体
+            if (i == sourceSchemeIdx) continue; // 自己→自己 跳过
+            // 显示: 方案 ID + 锁/烘焙角标 (与截图二的紧凑布局对齐)
+            QString label = QString::number(i);
+            if (sc.locked)  label += QStringLiteral("   🔒");
+            if (sc.isBaked) label += QStringLiteral("   [已烘焙]");
+            QAction* act = gMenu->addAction(label);
+            const int targetIdx = i;
+            const QString groupKey = g.key;
+            connect(act, &QAction::triggered, this, [this, sourceSchemeIdx, targetIdx, groupKey]{
+                auto& c = ProjectController::instance();
+                // 目标已锁定: 二次确认
+                if (c.isSchemeLocked(targetIdx)) {
+                    auto rc = QMessageBox::question(this,
+                        QStringLiteral("配色方案转移"),
+                        QStringLiteral("目标方案 [%1] 已锁定, 仍要写入?")
+                            .arg(c.project().schemes[targetIdx].name),
+                        QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel);
+                    if (rc != QMessageBox::Ok) return;
+                }
+                QString err;
+                if (!c.transferSchemeColorGroup(sourceSchemeIdx, targetIdx, groupKey, &err)) {
+                    QMessageBox::warning(this,
+                        QStringLiteral("配色方案转移失败"),
+                        err.isEmpty() ? QStringLiteral("未知错误") : err);
+                }
+            });
+            anyTarget = true;
+        }
+        if (!anyTarget) {
+            QAction* empty = gMenu->addAction(QStringLiteral("(没有可用目标方案)"));
+            empty->setEnabled(false);
+        }
+    }
+    return root;
 }
 
 // === 缩略图请求 ===

@@ -12,6 +12,8 @@
 
 #include <QMenuBar>
 #include <QMenu>
+#include <QWidgetAction>
+#include <QShortcut>
 #include <QStatusBar>
 #include <QDockWidget>
 #include <QFileDialog>
@@ -24,6 +26,7 @@
 #include <QDir>
 #include <QVariantMap>
 #include <QPushButton>
+#include <QTimer>
 
 namespace HighPro {
 
@@ -83,6 +86,16 @@ void MainWindow::buildDocks()
     // 先 add 到底部区, 再 split: 这样 m_dockEffect 占左, m_dockScheme 占右
     addDockWidget(Qt::BottomDockWidgetArea, m_dockScheme);
     splitDockWidget(m_dockEffect, m_dockScheme, Qt::Horizontal);
+
+    // 颜色效果 dock 初始宽度比之前少 100px (把空间让给方案画廊).
+    //   resizeDocks 在 show() 后才生效, 这里延迟到事件循环空闲触发.
+    QTimer::singleShot(0, this, [this]{
+        const int w = this->width();
+        if (w <= 0) return;
+        const int effW    = qMax(280, (w / 2) - 100);
+        const int schemeW = qMax(220, w - effW);
+        resizeDocks({m_dockEffect, m_dockScheme}, {effW, schemeW}, Qt::Horizontal);
+    });
 
     // 资源树点击 → 切换当前编辑层
     connect(m_layerTree, &LayerTreePanel::currentLayerChanged, this, [this](const QString& key){
@@ -172,6 +185,36 @@ void MainWindow::buildMenus()
 
     // M5: 方案管理 (一期菜单驱动, 批 2 改成画廊 dock)
     {
+        // 撤销 / 重做: 顶部, 覆盖整页所有方案级操作 (随机/重置/添加/删除/锁定/细化保存/转移)
+        auto* actUndo = menuScheme->addAction(QStringLiteral("撤销  Ctrl+Z"));
+        actUndo->setShortcut(QKeySequence::Undo);     // Ctrl+Z
+        actUndo->setShortcutContext(Qt::ApplicationShortcut);
+        connect(actUndo, &QAction::triggered, this, [this]{
+            auto& ctl = ProjectController::instance();
+            if (!ctl.canUndo()) {
+                statusBar()->showMessage(QStringLiteral("没有可撤销的操作"), 2000);
+                return;
+            }
+            const QString label = ctl.topUndoLabel();
+            ctl.undo();
+            statusBar()->showMessage(QStringLiteral("已撤销: %1").arg(label), 3000);
+        });
+        auto* actRedo = menuScheme->addAction(QStringLiteral("重做  Ctrl+Y"));
+        // Ctrl+Y (Windows 常规) — 同时不抢 Ctrl+Shift+Z (Qt 默认 Redo 在某些平台)
+        actRedo->setShortcut(QKeySequence("Ctrl+Y"));
+        actRedo->setShortcutContext(Qt::ApplicationShortcut);
+        connect(actRedo, &QAction::triggered, this, [this]{
+            auto& ctl = ProjectController::instance();
+            if (!ctl.canRedo()) {
+                statusBar()->showMessage(QStringLiteral("没有可重做的操作"), 2000);
+                return;
+            }
+            const QString label = ctl.topRedoLabel();
+            ctl.redo();
+            statusBar()->showMessage(QStringLiteral("已重做: %1").arg(label), 3000);
+        });
+        menuScheme->addSeparator();
+
         auto* actAdd = menuScheme->addAction(QStringLiteral("新增方案"));
         actAdd->setShortcut(QKeySequence("Ctrl+N"));
         connect(actAdd, &QAction::triggered, this, [this]{
@@ -326,6 +369,88 @@ void MainWindow::buildMenus()
                 QStringLiteral("全部方案导出完成: 写出 %1 个 LUT, 跳过 %2 个; 输出目录 %3")
                     .arg(r.successCount).arg(r.skippedCount).arg(outRoot), 8000);
         });
+    }
+
+    // === 导出已锁定的全部方案 (粗体 + 黄色) — 用 QWidgetAction 自定义样式 ===
+    {
+        auto* lblAct  = new QLabel(menuExport);
+        lblAct->setText(QStringLiteral("  <b><span style='color:#ffd24a;'>"
+                                       "导出已锁定的全部方案 add_lut PNG...</span></b>"
+                                       "&nbsp;&nbsp;<span style='color:#888;'>Ctrl+Alt+E</span>  "));
+        lblAct->setTextFormat(Qt::RichText);
+        lblAct->setContentsMargins(8, 4, 12, 4);
+        // hover 高亮 (与 QMenu 默认 item:selected 一致, 让交互不突兀)
+        lblAct->setStyleSheet(
+            "QLabel{background:transparent;}"
+            "QLabel:hover{background:#3b6ea8;}");
+        // QLabel 默认不接受鼠标点击, 需 mouseTracking + eventFilter? 改用 QPushButton.
+        // 这里用 QPushButton 做按钮形态, 然后塞进 QWidgetAction.
+        auto* btn = new QPushButton(menuExport);
+        btn->setText(QStringLiteral("导出已锁定的全部方案 add_lut PNG...     Ctrl+Alt+E"));
+        QFont f = btn->font();
+        f.setBold(true);
+        btn->setFont(f);
+        btn->setFlat(true);
+        btn->setStyleSheet(
+            "QPushButton{color:#ffd24a; text-align:left; padding:4px 16px; border:none;"
+            " background:transparent;}"
+            "QPushButton:hover{background:#3b6ea8; color:#ffd24a;}");
+        btn->setCursor(Qt::PointingHandCursor);
+        delete lblAct;     // 不再使用 label, 仅留 btn
+
+        auto* wa = new QWidgetAction(menuExport);
+        wa->setDefaultWidget(btn);
+        menuExport->addAction(wa);
+
+        auto doExportLocked = [this, prepareExport]{
+            QString outRoot;
+            if (!prepareExport(outRoot)) return;
+
+            const auto& proj = ProjectController::instance().project();
+            int lockedN = 0;
+            for (int i = 1; i < proj.schemes.size(); ++i) {
+                if (proj.schemes[i].locked) ++lockedN;
+            }
+            if (lockedN <= 0) {
+                QMessageBox::information(this, QStringLiteral("导出"),
+                    QStringLiteral("当前没有锁定的方案. 请先在方案画廊点击 🔒 锁定后再试."));
+                return;
+            }
+            auto rc = QMessageBox::question(this, QStringLiteral("导出已锁定方案"),
+                QStringLiteral("将导出 %1 个已锁定方案到:\n%2\n\n继续?").arg(lockedN).arg(outRoot),
+                QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Ok);
+            if (rc != QMessageBox::Ok) return;
+
+            static LutBaker baker;
+            QString err;
+            if (!baker.init(&err)) {
+                QMessageBox::critical(this, QStringLiteral("导出失败"),
+                    QStringLiteral("LutBaker 初始化失败: %1").arg(err));
+                return;
+            }
+            auto r = PngExporter::exportLockedSchemes(proj, baker);
+            if (!r.lastError.isEmpty()) {
+                QMessageBox::warning(this, QStringLiteral("导出失败"), r.lastError);
+                statusBar()->showMessage(r.lastError, 8000);
+                return;
+            }
+            statusBar()->showMessage(
+                QStringLiteral("已锁定方案导出完成: 写出 %1 个 LUT, 跳过 %2 个; 输出目录 %3")
+                    .arg(r.successCount).arg(r.skippedCount).arg(outRoot), 8000);
+        };
+
+        connect(btn, &QPushButton::clicked, this, [this, doExportLocked]{
+            // 点击后立刻关菜单, 否则按钮还在 hover 状态下弹对话框很突兀
+            for (auto* m : findChildren<QMenu*>()) {
+                if (m->isVisible()) m->close();
+            }
+            doExportLocked();
+        });
+
+        // 应用级快捷键: Ctrl+Alt+E
+        auto* sc = new QShortcut(QKeySequence("Ctrl+Alt+E"), this);
+        sc->setContext(Qt::ApplicationShortcut);
+        connect(sc, &QShortcut::activated, this, doExportLocked);
     }
 
     menuView->addAction(m_dockLayer->toggleViewAction());

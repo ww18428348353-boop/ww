@@ -78,8 +78,10 @@ private:
     QCheckBox*    m_showLabelChk{ nullptr }; // 画布方案 ID 显示开关
     QSpinBox*     m_labelGapYSpin{ nullptr }; // 方案 ID Y 间距 (label 距头顶, px)
     QPushButton*  m_fullCanvasBtn{ nullptr }; // 全屏画布开关 (≡ Ctrl+Space)
+    QPushButton*  m_hideUnlockedBtn{ nullptr }; // 显示/关闭 画布里"未上锁"的方案 (只看 🔒 集合)
     bool          m_showLabel = true;
     int           m_labelGapY = 200;        // 默认: label 离 cell 顶部 200px
+    bool          m_hideUnlocked = false;   // true = 画布只画锁定方案 (+ 本体始终保留)
 
     // GIF 输出
     QSpinBox*     m_gifLoopSpin{ nullptr };  // 循环次数 (0=无限, 1=播 1 次)
@@ -93,6 +95,9 @@ private:
 
     int           m_charGapXPx = -300;     // 默认 (针对 500×500 TGA 的视觉合适值)
     int           m_charGapYPx = -260;     // 默认 (上下行重叠 ~半身)
+
+    // 临时标志: 渲染 GIF 期间不画"选中三角"标识 (用户要求 GIF 输出干净, 无 UI 装饰)
+    bool          m_renderingForGif = false;
 
     // M5: 选中标识闪烁
     QTimer        m_blinkTimer;

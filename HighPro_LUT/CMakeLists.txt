@@ -109,6 +109,8 @@ set(APP_SOURCES
     src/ui/EffectPanel.cpp
     src/ui/SchemePanel.h
     src/ui/SchemePanel.cpp
+    src/ui/SchemeRefineDialog.h
+    src/ui/SchemeRefineDialog.cpp
     src/ui/widgets/CurveEditor.h
     src/ui/widgets/CurveEditor.cpp
 

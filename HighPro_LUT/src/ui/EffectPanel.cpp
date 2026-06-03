@@ -122,10 +122,11 @@ void EffectPanel::buildUi()
     m_scroll->setWidget(m_content);
     root->addWidget(m_scroll);
 
-    // 底部按钮 (三行, 让操作分组清晰):
-    //   行 0: P0 智能随机 (Palette + LayerSlot 驱动, 推荐)
-    //   行 1: 旧 随机 (纯参数随机, 保留用于对比)
-    //   行 2: 重置 (当前层 / 所有层) + 复制
+    // 底部按钮 (四行, 与截图四完全对齐):
+    //   行 0: 智能+随机 (单独一个, 居左)
+    //   行 1: 智能 × 4   (当前层 / 所有层 / 可编辑 / 全部)
+    //   行 2: 随机 × 4
+    //   行 3: 重置 × 4
     auto* row0 = new QHBoxLayout();
     row0->setContentsMargins(6, 6, 6, 0);
     row0->setSpacing(8);
@@ -137,10 +138,10 @@ void EffectPanel::buildUi()
     auto* btnSmartAll     = new QPushButton(QStringLiteral("🎨 智能所有层"), this);
     btnSmartAll->setToolTip(QStringLiteral(
         "当前方案换一套完整 palette (色相统一), 所有可见非肤色层按 slot 重算."));
-    auto* btnSmartEditAll = new QPushButton(QStringLiteral("🎨 智能可编辑全部"), this);
+    auto* btnSmartEditAll = new QPushButton(QStringLiteral("🎨 智能可编辑"), this);
     btnSmartEditAll->setToolTip(QStringLiteral(
         "所有可编辑方案 (排除本体/已烘焙) 按 idx 取 27 风格槽生成 palette, 各层按 slot 重算."));
-    auto* btnSmartEvery   = new QPushButton(QStringLiteral("🎨 智能全部"), this);
+    auto* btnSmartEvery   = new QPushButton(QStringLiteral("🎨 智能全部 "), this);
     btnSmartEvery->setToolTip(QStringLiteral(
         "所有非本体方案 (含已烘焙) 全部智能随机.\n"
         "注意: 已烘焙方案会降级为可编辑, 原 add_lut PNG 引用会丢失"));
@@ -159,23 +160,32 @@ void EffectPanel::buildUi()
     const QString kMixStyle = QStringLiteral(
         "QPushButton { border: 1px solid #a060c0; background: #3d2a48; }"
         "QPushButton:hover { background: #4f3860; }");
+
+    // 全部按钮统一 95×30 (整齐排列 + 同间距, 与设计稿对齐)
+    const QSize kBtnSize(95, 30);
     for (auto* b : { btnSmartCur, btnSmartAll, btnSmartEditAll, btnSmartEvery }) {
-        b->setMinimumHeight(28);
+        b->setFixedSize(kBtnSize);
         b->setStyleSheet(kSmartStyle);
     }
-    btnMixEvery->setMinimumHeight(28);
+    btnMixEvery->setFixedSize(kBtnSize);
     btnMixEvery->setStyleSheet(kMixStyle);
 
-    row0->addWidget(btnSmartCur);
-    row0->addWidget(btnSmartAll);
-    row0->addSpacing(6);
-    row0->addWidget(btnSmartEditAll);
-    row0->addWidget(btnSmartEvery);
-    row0->addSpacing(6);
+    // 第 0 行: 智能 + 智能+随机. 与下面两行统一: 6 个槽位 (空+智能×4 + 智能+随机),
+    //          截图四里第 0 行是单独一个 "智能+随机" 居左.
     row0->addWidget(btnMixEvery);
     row0->addStretch(1);
 
-    // 旧两行不动
+    // 第 1 行: 智能 × 4 (当前层 / 所有层 / 可编辑 / 全部)
+    auto* rowSmart = new QHBoxLayout();
+    rowSmart->setContentsMargins(6, 6, 6, 0);
+    rowSmart->setSpacing(8);
+    rowSmart->addWidget(btnSmartCur);
+    rowSmart->addWidget(btnSmartAll);
+    rowSmart->addWidget(btnSmartEditAll);
+    rowSmart->addWidget(btnSmartEvery);
+    rowSmart->addStretch(1);
+
+    // 第 2 行: 随机 × 4
     auto* row1 = new QHBoxLayout();
     row1->setContentsMargins(6, 6, 6, 0);
     row1->setSpacing(8);
@@ -184,9 +194,9 @@ void EffectPanel::buildUi()
     btnRandomCur->setToolTip(QStringLiteral("当前方案 - 当前层 应用一组写实风随机效果"));
     auto* btnRandomAll     = new QPushButton(QStringLiteral("🎲 随机所有层"), this);
     btnRandomAll->setToolTip(QStringLiteral("当前方案下所有可见层 (除肤色保护层) 各自独立随机"));
-    auto* btnRandomEditAll = new QPushButton(QStringLiteral("🎲 随机可编辑全部"), this);
+    auto* btnRandomEditAll = new QPushButton(QStringLiteral("🎲 随机可编辑"), this);
     btnRandomEditAll->setToolTip(QStringLiteral("所有可编辑方案 (排除本体和已烘焙) 的所有层全部独立随机"));
-    auto* btnRandomEvery   = new QPushButton(QStringLiteral("🎲 随机全部"), this);
+    auto* btnRandomEvery   = new QPushButton(QStringLiteral("🎲 随机全部 "), this);
     btnRandomEvery->setToolTip(QStringLiteral("所有非本体方案 (含已烘焙) 全部独立随机.\n注意: 已烘焙方案会降级为可编辑, 原 add_lut PNG 引用会丢失"));
 
     auto* row2 = new QHBoxLayout();
@@ -196,31 +206,29 @@ void EffectPanel::buildUi()
     auto* btnReset    = new QPushButton(QStringLiteral("↺ 重置当前层"), this);
     auto* btnResetAll = new QPushButton(QStringLiteral("↺ 重置所有层"), this);
     btnResetAll->setToolTip(QStringLiteral("把当前方案下所有层的 7 个效果重置回默认 (本体)"));
-    auto* btnResetEditAll = new QPushButton(QStringLiteral("↺ 重置可编辑全部"), this);
+    auto* btnResetEditAll = new QPushButton(QStringLiteral("↺ 重置可编辑"), this);
     btnResetEditAll->setToolTip(QStringLiteral("所有可编辑方案 (排除本体和已烘焙) 的所有层全部重置"));
-    auto* btnResetEvery   = new QPushButton(QStringLiteral("↺ 重置全部"), this);
+    auto* btnResetEvery   = new QPushButton(QStringLiteral("↺ 重置全部 "), this);
     btnResetEvery->setToolTip(QStringLiteral("所有非本体方案 (含已烘焙) 全部重置.\n注意: 已烘焙方案会降级为可编辑, 原 add_lut PNG 引用会丢失"));
     auto* btnCopyAll  = new QPushButton(QStringLiteral("📋 复制到所有层"), this);
 
     for (auto* b : { btnRandomCur, btnRandomAll, btnRandomEditAll, btnRandomEvery,
                      btnReset, btnResetAll, btnResetEditAll, btnResetEvery, btnCopyAll }) {
-        b->setMinimumHeight(28);
+        b->setFixedSize(kBtnSize);
     }
 
     row1->addWidget(btnRandomCur);
     row1->addWidget(btnRandomAll);
-    row1->addSpacing(6);
     row1->addWidget(btnRandomEditAll);
     row1->addWidget(btnRandomEvery);
     row1->addStretch(1);
 
     row2->addWidget(btnReset);
     row2->addWidget(btnResetAll);
-    row2->addSpacing(6);
     row2->addWidget(btnResetEditAll);
     row2->addWidget(btnResetEvery);
-    row2->addSpacing(6);
-    row2->addWidget(btnCopyAll);
+    // "复制到所有层" 按钮按需求隐藏 (代码保留供后续复用)
+    btnCopyAll->hide();
     row2->addStretch(1);
 
     // 按钮容器: 整块区域加大 ~30% 高度, 留更多视觉空间
@@ -232,10 +240,11 @@ void EffectPanel::buildUi()
     auto* btnLay = new QVBoxLayout(btnFrame);
     btnLay->setContentsMargins(2, 8, 2, 8);   // 上下 8px 留白 → 比之前的 4px 多 30%
     btnLay->setSpacing(6);
-    btnLay->addLayout(row0);            // P0 智能随机 (新)
-    btnLay->addLayout(row1);            // 旧 随机
-    btnLay->addLayout(row2);            // 重置 / 复制
-    btnFrame->setMinimumHeight(124);    // 多了一行, 高度补 ~40px
+    btnLay->addLayout(row0);            // 智能+随机 (单独 1 个)
+    btnLay->addLayout(rowSmart);        // 智能 × 4
+    btnLay->addLayout(row1);            // 随机 × 4
+    btnLay->addLayout(row2);            // 重置 × 4
+    btnFrame->setMinimumHeight(160);    // 4 行 × 30 + 行间距 6 + padding ≈ 160
 
     root->addWidget(btnFrame);
 
