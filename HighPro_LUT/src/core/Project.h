@@ -2,10 +2,12 @@
 
 #include "core/LayerData.h"
 #include "core/ColorEffect.h"
+#include "core/SchemePalette.h"
 #include <QString>
 #include <QSet>
 #include <QHash>
 #include <QVector>
+#include <optional>
 
 namespace HighPro {
 
@@ -16,6 +18,8 @@ namespace HighPro {
 //   1) 用户手编 (isBaked=false): EffectStack 实时烘焙 → effect_chain PS 实时渲染
 //   2) 已烘焙导入 (isBaked=true): 来自 add_lut/0N.png, 只存层 → LUT 文件路径,
 //      渲染时走 recolor PS, 不走 effect_chain. EffectPanel 对此类禁编辑.
+//
+// P0 智能随机: 方案级 palette 跟着 Scheme 走 (随重排/删除一起搬迁).
 struct Scheme
 {
     QString                     name;       // 显示名: "本体" / "方案01-默认本体" 等
@@ -24,6 +28,10 @@ struct Scheme
     bool                        locked    = false;     // 🔒 锁: 不参与随机变色 (本体/已烘焙不受影响)
     QHash<QString, EffectStack> layerEffects;          // 用户手编: layerKey -> 7 效果栈
     QHash<QString, QString>     layerLutPath;          // 已烘焙: layerKey -> add_lut/0N.png 绝对路径
+
+    // P0 智能随机: 该方案当前配色盘. 无值 = 尚未跑过智能随机.
+    // 智能当前层会 ensurePaletteForScheme() 自动生成, 智能所有层会强制重生.
+    std::optional<SchemePalette> palette;
 
     static Scheme makeBuiltin() {
         Scheme s; s.name = "方案 0 - 默认本体"; s.isBuiltin = true; return s;
@@ -44,6 +52,12 @@ struct Project
 
     // M7: 肤色保护层 (这些层在所有方案下都不应用变色, 保持本体)
     QSet<QString> skinSafeLayerKeys;
+
+    // P0 智能随机: 用户手动指定的层语义. 未在表中或值为 Unknown → defaultSlotFor() 启发式.
+    //   - 设 LayerSlot::Skin 时, ProjectController 同步加入 skinSafeLayerKeys.
+    //   - 取消 skinSafeLayerKeys 时, ProjectController 同步把 Skin 改回 Unknown.
+    //   - 最终保护源仍是 skinSafeLayerKeys, slotFor() 命中 skinSafe 永远返回 Skin.
+    QHash<QString, LayerSlot> layerSlots;
 
     QString currentAction;
     int     currentDirection = 0;
@@ -66,6 +80,7 @@ struct Project
         layers.clear();
         hiddenLayerKeys.clear();
         skinSafeLayerKeys.clear();
+        layerSlots.clear();
         currentAddonKey.clear();
         currentAction.clear();
         currentDirection = 0;
@@ -83,6 +98,40 @@ struct Project
 
     bool isSkinSafe(const LayerData& l) const {
         return skinSafeLayerKeys.contains(l.key());
+    }
+
+    // P0: 启发式默认 LayerSlot.
+    // body → Skin, num_00..04 → Clothing/Skirt/Hair/Decor01/Decor02, num_05+ → Decor01,
+    // addon → Decor02 (挂件多为发光 / 高亮点缀).
+    LayerSlot defaultSlotFor(const LayerData& l) const {
+        if (skinSafeLayerKeys.contains(l.key())) return LayerSlot::Skin;
+        switch (l.kind) {
+        case LayerKind::Body:
+            return LayerSlot::Skin;
+        case LayerKind::Numbered:
+            switch (l.numberedIdx) {
+            case 0:  return LayerSlot::Clothing;
+            case 1:  return LayerSlot::Skirt;
+            case 2:  return LayerSlot::Hair;
+            case 3:  return LayerSlot::Decor01;
+            case 4:  return LayerSlot::Decor02;
+            default: return LayerSlot::Decor01;
+            }
+        case LayerKind::Addon:
+            return LayerSlot::Decor02;
+        }
+        return LayerSlot::Clothing;
+    }
+
+    // P0: 实际 slot. 肤色保护永远优先 (双向同步源).
+    //   skinSafe 命中     → Skin
+    //   layerSlots 命中且非 Unknown → 用户指定
+    //   其他              → 启发式
+    LayerSlot slotFor(const LayerData& l) const {
+        if (skinSafeLayerKeys.contains(l.key())) return LayerSlot::Skin;
+        const LayerSlot saved = layerSlots.value(l.key(), LayerSlot::Unknown);
+        if (saved != LayerSlot::Unknown) return saved;
+        return defaultSlotFor(l);
     }
 
     QString lutPathFor(const LayerData& l) const {

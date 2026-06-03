@@ -187,4 +187,24 @@ void randomizeStack(EffectStack& s, quint32 seed = 0);
 extern const PhotoFilterPreset kPhotoFilterPresets[];
 extern const int kPhotoFilterPresetCount;
 
+// === P0 智能随机 (Palette + LayerSlot 驱动) ===
+// 前置声明, 避免拉入 LayerData.h / SchemePalette.h.
+enum class LayerSlot : int;
+struct SchemePalette;
+
+// 按 LayerSlot 分派 8 种参数策略, 输入 Palette 决定主/辅/点缀色相方向.
+//   Skin           → reset, 不变色
+//   Hair           → secondaryHue ±15°, 低饱和 (保明度)
+//   Clothing       → primaryHue ±8°, 中低饱和 (大面积主色)
+//   Skirt          → primaryHue 或 secondaryHue ±15°, 大面积低饱
+//   Decor01        → accentHue ±10°, 中高饱
+//   Decor02        → accent2Hue / glowHue ±10°, 高饱 + 微提亮 (高亮 / 发光)
+//   WeaponMetal    → 固定金属色池 (palette.metal), 高对比保高光
+//   WeaponNonMetal → 70% 随 Clothing, 30% 随 Decor01
+// shadowProtectThreshold 保留 (不会被覆盖).
+void randomizeStackBySlot(EffectStack& s,
+                          LayerSlot slot,
+                          const SchemePalette& palette,
+                          quint32 seed = 0);
+
 } // namespace HighPro

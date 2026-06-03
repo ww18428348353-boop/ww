@@ -220,7 +220,6 @@ void LayerTreePanel::syncCheckStates()
     m_suppressSignal = true;
 
     const auto& proj = ProjectController::instance().project();
-    static const QString kSkinPrefix = QStringLiteral("🛡 ");
 
     auto applyOne = [&](QTreeWidgetItem* node) {
         const QString k = node->data(0, RoleLayerKey).toString();
@@ -229,12 +228,31 @@ void LayerTreePanel::syncCheckStates()
         if ((node->checkState(0) == Qt::Checked) != visible) {
             node->setCheckState(0, visible ? Qt::Checked : Qt::Unchecked);
         }
-        // 肤色标记 → 名字加 🛡 前缀; 同步颜色
-        QString base = node->text(0);
-        // 反复剥离前缀 (防多次 sync 累加 emoji)
-        while (base.startsWith(kSkinPrefix)) base = base.mid(kSkinPrefix.size());
+
+        // P0: slot emoji 前缀.
+        //   1) 先剥掉所有可能的旧 emoji 前缀, 防多次 sync 累加.
+        //   2) Skin (含旧 skinSafeLayerKeys + 新 slot=Skin) → 🛡 优先 + 黄字.
+        //   3) 其他 slot → 对应 emoji.
+        //   4) Unknown 不加前缀, 保持原始 displayName 简洁.
+        QString base = stripLayerSlotPrefix(node->text(0));
+
+        // 找到对应 LayerData (为了 slotFor 启发式)
+        const LayerData* layer = nullptr;
+        for (const auto& l : proj.layers) {
+            if (l.key() == k) { layer = &l; break; }
+        }
+
         const bool skin = proj.skinSafeLayerKeys.contains(k);
-        const QString newText = skin ? (kSkinPrefix + base) : base;
+        LayerSlot slot  = LayerSlot::Unknown;
+        if (layer) slot = proj.slotFor(*layer);
+
+        QString newText = base;
+        if (skin) {
+            newText = layerSlotEmoji(LayerSlot::Skin) + QStringLiteral(" ") + base;
+        } else if (slot != LayerSlot::Unknown) {
+            newText = layerSlotEmoji(slot) + QStringLiteral(" ") + base;
+        }
+
         if (node->text(0) != newText) node->setText(0, newText);
         node->setForeground(0, skin ? QBrush(QColor(255, 200, 80)) : QBrush());
     };
@@ -284,7 +302,18 @@ void LayerTreePanel::onContextMenu(const QPoint& pos)
     const bool skin = proj.skinSafeLayerKeys.contains(key);
     const int  curN = proj.skinSafeLayerKeys.size();
 
+    // 当前层对应 LayerData (取当前 slot 用于打勾)
+    const LayerData* layer = nullptr;
+    for (const auto& l : proj.layers) {
+        if (l.key() == key) { layer = &l; break; }
+    }
+    const LayerSlot currentSlot = layer ? proj.slotFor(*layer) : LayerSlot::Unknown;
+    const bool      hasManual   = proj.layerSlots.contains(key)
+                                  && proj.layerSlots.value(key) != LayerSlot::Unknown;
+
     QMenu menu(this);
+
+    // --- 1. 旧肤色保护入口 (保留, 跟 slot=Skin 双向同步) ---
     QAction* aSkin = nullptr;
     if (skin) {
         aSkin = menu.addAction(QStringLiteral("取消肤色保护 (当前 %1 层)").arg(curN));
@@ -293,9 +322,66 @@ void LayerTreePanel::onContextMenu(const QPoint& pos)
     }
     aSkin->setToolTip(QStringLiteral("肤色层在所有方案下都不参与变色, 永远保持本体"));
 
+    menu.addSeparator();
+
+    // --- 2. P0: 设置层语义 → 子菜单 (9 项) ---
+    auto* subSlot = menu.addMenu(QStringLiteral("设置层语义 (智能随机用)"));
+    subSlot->setToolTip(QStringLiteral(
+        "决定智能随机时该层用哪种参数策略.\n"
+        "选 [自动] 走启发式 (body→肤色, num_00→服装, num_01→裙摆 ...).\n"
+        "选 [肤色] 等同肤色保护, 任何方案下都不变色."));
+
+    auto addSlotItem = [&](LayerSlot s, bool isAuto) {
+        const QString label = isAuto
+            ? QStringLiteral("%1 自动 (推断: %2)")
+              .arg(layerSlotEmoji(LayerSlot::Unknown))
+              .arg(layer ? layerSlotDisplayName(proj.defaultSlotFor(*layer))
+                         : layerSlotDisplayName(LayerSlot::Unknown))
+            : QStringLiteral("%1 %2")
+              .arg(layerSlotEmoji(s))
+              .arg(layerSlotDisplayName(s));
+        QAction* a = subSlot->addAction(label);
+        a->setCheckable(true);
+        // 打勾: 自动项 = 当前没手动指定且非 skin; 具体 slot = 已手动指定为该值 (skin 单独处理)
+        if (isAuto) {
+            a->setChecked(!hasManual && !skin);
+        } else if (s == LayerSlot::Skin) {
+            a->setChecked(skin);
+        } else {
+            a->setChecked(hasManual && currentSlot == s && !skin);
+        }
+        a->setData(static_cast<int>(s));
+        return a;
+    };
+
+    QAction* aAuto = addSlotItem(LayerSlot::Unknown, true);
+    subSlot->addSeparator();
+    addSlotItem(LayerSlot::Skin, false);
+    addSlotItem(LayerSlot::Hair, false);
+    addSlotItem(LayerSlot::Clothing, false);
+    addSlotItem(LayerSlot::Skirt, false);
+    addSlotItem(LayerSlot::Decor01, false);
+    addSlotItem(LayerSlot::Decor02, false);
+    addSlotItem(LayerSlot::WeaponMetal, false);
+    addSlotItem(LayerSlot::WeaponNonMetal, false);
+
     QAction* sel = menu.exec(m_tree->viewport()->mapToGlobal(pos));
+    if (!sel) return;
+
     if (sel == aSkin) {
         ctl.setLayerSkinSafe(key, !skin);
+        return;
+    }
+
+    // slot 子菜单触发
+    if (sel == aAuto) {
+        ctl.setLayerSlot(key, LayerSlot::Unknown);
+        return;
+    }
+    // 子菜单中其他项 data 存了 LayerSlot int
+    if (qobject_cast<QMenu*>(sel->parent()) == subSlot) {
+        const int iv = sel->data().toInt();
+        ctl.setLayerSlot(key, static_cast<LayerSlot>(iv));
     }
 }
 

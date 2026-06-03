@@ -122,9 +122,60 @@ void EffectPanel::buildUi()
     m_scroll->setWidget(m_content);
     root->addWidget(m_scroll);
 
-    // 底部按钮 (两行, 让操作分组清晰):
-    //   行 1: 随机 (当前层 / 所有层 / 可编辑全部 / 全部)
+    // 底部按钮 (三行, 让操作分组清晰):
+    //   行 0: P0 智能随机 (Palette + LayerSlot 驱动, 推荐)
+    //   行 1: 旧 随机 (纯参数随机, 保留用于对比)
     //   行 2: 重置 (当前层 / 所有层) + 复制
+    auto* row0 = new QHBoxLayout();
+    row0->setContentsMargins(6, 6, 6, 0);
+    row0->setSpacing(8);
+
+    auto* btnSmartCur     = new QPushButton(QStringLiteral("🎨 智能当前层"), this);
+    btnSmartCur->setToolTip(QStringLiteral(
+        "当前方案 - 当前层 按 LayerSlot 智能随机.\n"
+        "复用当前方案 palette (没有则自动生成), 不动其他层."));
+    auto* btnSmartAll     = new QPushButton(QStringLiteral("🎨 智能所有层"), this);
+    btnSmartAll->setToolTip(QStringLiteral(
+        "当前方案换一套完整 palette (色相统一), 所有可见非肤色层按 slot 重算."));
+    auto* btnSmartEditAll = new QPushButton(QStringLiteral("🎨 智能可编辑全部"), this);
+    btnSmartEditAll->setToolTip(QStringLiteral(
+        "所有可编辑方案 (排除本体/已烘焙) 按 idx 取 27 风格槽生成 palette, 各层按 slot 重算."));
+    auto* btnSmartEvery   = new QPushButton(QStringLiteral("🎨 智能全部"), this);
+    btnSmartEvery->setToolTip(QStringLiteral(
+        "所有非本体方案 (含已烘焙) 全部智能随机.\n"
+        "注意: 已烘焙方案会降级为可编辑, 原 add_lut PNG 引用会丢失"));
+    // P0 v12: 智能+随机 混合按钮 (效果控件 50% 智能 + 50% 旧随机插值)
+    auto* btnMixEvery     = new QPushButton(QStringLiteral("🎨🎲 智能+随机"), this);
+    btnMixEvery->setToolTip(QStringLiteral(
+        "所有非本体方案 (含已烘焙) 每个效果控件参数取智能值 × 50% + 旧随机值 × 50%.\n"
+        "得到介于「智能」和「旧随机」之间的中间态.\n"
+        "注意: 已烘焙方案会降级为可编辑, 原 add_lut PNG 引用会丢失"));
+
+    // 智能按钮蓝色边样式区分
+    const QString kSmartStyle = QStringLiteral(
+        "QPushButton { border: 1px solid #4a8fcf; background: #2d3e52; }"
+        "QPushButton:hover { background: #3a5070; }");
+    // 混合按钮紫色边
+    const QString kMixStyle = QStringLiteral(
+        "QPushButton { border: 1px solid #a060c0; background: #3d2a48; }"
+        "QPushButton:hover { background: #4f3860; }");
+    for (auto* b : { btnSmartCur, btnSmartAll, btnSmartEditAll, btnSmartEvery }) {
+        b->setMinimumHeight(28);
+        b->setStyleSheet(kSmartStyle);
+    }
+    btnMixEvery->setMinimumHeight(28);
+    btnMixEvery->setStyleSheet(kMixStyle);
+
+    row0->addWidget(btnSmartCur);
+    row0->addWidget(btnSmartAll);
+    row0->addSpacing(6);
+    row0->addWidget(btnSmartEditAll);
+    row0->addWidget(btnSmartEvery);
+    row0->addSpacing(6);
+    row0->addWidget(btnMixEvery);
+    row0->addStretch(1);
+
+    // 旧两行不动
     auto* row1 = new QHBoxLayout();
     row1->setContentsMargins(6, 6, 6, 0);
     row1->setSpacing(8);
@@ -181,11 +232,58 @@ void EffectPanel::buildUi()
     auto* btnLay = new QVBoxLayout(btnFrame);
     btnLay->setContentsMargins(2, 8, 2, 8);   // 上下 8px 留白 → 比之前的 4px 多 30%
     btnLay->setSpacing(6);
-    btnLay->addLayout(row1);
-    btnLay->addLayout(row2);
-    btnFrame->setMinimumHeight(86);
+    btnLay->addLayout(row0);            // P0 智能随机 (新)
+    btnLay->addLayout(row1);            // 旧 随机
+    btnLay->addLayout(row2);            // 重置 / 复制
+    btnFrame->setMinimumHeight(124);    // 多了一行, 高度补 ~40px
 
     root->addWidget(btnFrame);
+
+    // P0 智能随机 (新) 接 smart* 方法
+    connect(btnSmartCur, &QPushButton::clicked, this, [this]{
+        ProjectController::instance().smartRandomizeCurrentLayer();
+        rebuildForCurrentLayer();
+    });
+    connect(btnSmartAll, &QPushButton::clicked, this, [this]{
+        ProjectController::instance().smartRandomizeAllLayers();
+        rebuildForCurrentLayer();
+    });
+    connect(btnSmartEditAll, &QPushButton::clicked, this, [this]{
+        ProjectController::instance().smartRandomizeAllSchemes(false);
+        rebuildForCurrentLayer();
+    });
+    connect(btnSmartEvery, &QPushButton::clicked, this, [this]{
+        // "智能全部" 会让已烘焙方案丢失原 LUT, 给个 1 次确认
+        auto& proj = ProjectController::instance().project();
+        int bakedN = 0;
+        for (int i = 1; i < proj.schemes.size(); ++i) {
+            if (proj.schemes[i].isBaked) ++bakedN;
+        }
+        if (bakedN > 0) {
+            auto rc = QMessageBox::question(this, QStringLiteral("智能全部"),
+                QStringLiteral("此操作会把 %1 个已烘焙方案降级为可编辑, 原 add_lut PNG 引用会丢失.\n继续?").arg(bakedN),
+                QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel);
+            if (rc != QMessageBox::Ok) return;
+        }
+        ProjectController::instance().smartRandomizeAllSchemes(true);
+        rebuildForCurrentLayer();
+    });
+    connect(btnMixEvery, &QPushButton::clicked, this, [this]{
+        // 智能+随机 混合: 同样会让已烘焙降级
+        auto& proj = ProjectController::instance().project();
+        int bakedN = 0;
+        for (int i = 1; i < proj.schemes.size(); ++i) {
+            if (proj.schemes[i].isBaked) ++bakedN;
+        }
+        if (bakedN > 0) {
+            auto rc = QMessageBox::question(this, QStringLiteral("智能+随机"),
+                QStringLiteral("此操作会把 %1 个已烘焙方案降级为可编辑, 原 add_lut PNG 引用会丢失.\n继续?").arg(bakedN),
+                QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel);
+            if (rc != QMessageBox::Ok) return;
+        }
+        ProjectController::instance().mixRandomizeAllSchemes(true);
+        rebuildForCurrentLayer();
+    });
 
     connect(btnRandomCur, &QPushButton::clicked, this, [this]{
         ProjectController::instance().randomizeCurrentLayer();

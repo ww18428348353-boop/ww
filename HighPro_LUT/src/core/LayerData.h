@@ -7,6 +7,40 @@
 
 namespace HighPro {
 
+// 半语义层角色 (P0): 决定智能随机时该层用哪种参数策略.
+// Unknown = 用户未指定, slotFor() 走启发式 defaultSlotFor().
+//   Skin           = 肤色, 不参与变色 (与 skinSafeLayerKeys 双向同步)
+//   Hair           = 头发, 低幅协调色
+//   Clothing       = 服装主体, 主色承载
+//   Skirt          = 裙摆, 跟服装主色或辅色协调
+//   Decor01        = 主装饰, 点缀色 (accent)
+//   Decor02        = 次装饰 / 宝石 / 发光点, 高亮 / glow
+//   WeaponMetal    = 武器金属, 固定金属色池 (金/银/铜/黑铁/蓝钢)
+//   WeaponNonMetal = 武器非金属, 跟服装或装饰统一
+enum class LayerSlot : int {
+    Unknown = 0,
+    Skin,
+    Hair,
+    Clothing,
+    Skirt,
+    Decor01,
+    Decor02,
+    WeaponMetal,
+    WeaponNonMetal,
+};
+
+// --- LayerSlot helper ---
+// 字符串 ↔ enum (JSON 兼容). 未识别字符串返回 Unknown.
+QString   layerSlotToString(LayerSlot slot);
+LayerSlot layerSlotFromString(const QString& s);
+// 单字符 emoji, 用于 LayerTreePanel 前缀.
+QString   layerSlotEmoji(LayerSlot slot);
+// UI 中文显示名 (右键菜单 / Tooltip).
+QString   layerSlotDisplayName(LayerSlot slot);
+// LayerTreePanel 在 refresh / sync 多次刷新时, 先剥掉旧 emoji + 空格再加新的.
+// 否则会出现 "👕 👕 👕 num_00" 累积叠加.
+QString   stripLayerSlotPrefix(QString text);
+
 // 单个动作 = 多方向 × 多帧 (帧路径列表)
 struct Action
 {

@@ -76,6 +76,25 @@ public:
     //   includeBaked=true  → 已烘焙方案先转为可编辑 (丢失原 add_lut PNG 引用), 再随机.
     void randomizeAllSchemes(bool includeBaked);
 
+    // === P0 智能随机 (Palette + LayerSlot 驱动, 与上面 4 个并存) ===
+    //   smartRandomizeCurrentLayer: 当前方案 - 当前层. 复用 (或自动生成) 方案 palette,
+    //                               按 slotFor() 取参数策略. 不动其他层, 不动 palette.
+    //   smartRandomizeAllLayers:    当前方案换一套完整 palette, 全层按 slot 重算.
+    //   smartRandomizeAllSchemes:   每方案按 (idx-1) % 27 取 kSchemeStyles 风格生成 palette,
+    //                               全层按 slot 重算. includeBaked=true 会把已烘焙降级.
+    //   mixRandomizeAllSchemes:     每方案独立 50% 概率走 smart 或 legacy 随机,
+    //                               混合分布. includeBaked 同上.
+    void smartRandomizeCurrentLayer();
+    void smartRandomizeAllLayers();
+    void smartRandomizeAllSchemes(bool includeBaked);
+    void mixRandomizeAllSchemes(bool includeBaked);
+
+    // P0: 用户右键设置层语义.
+    //   slot == Unknown → 清除手动指定 (slotFor() 走启发式).
+    //   slot == Skin    → 同步加入 skinSafeLayerKeys.
+    //   slot != Skin    → 同步移出 skinSafeLayerKeys.
+    void setLayerSlot(const QString& layerKey, LayerSlot slot);
+
     // M5: 方案管理
     int  schemeCount() const { return m_project.schemes.size(); }
     int  currentSchemeIndex() const { return m_project.currentSchemeIndex; }
@@ -105,6 +124,11 @@ signals:
 
 private:
     ProjectController() = default;
+
+    // P0: 确保方案 palette 已生成 (按方案 idx 选风格), 返回引用.
+    // 仅供 smart* 方法内部使用. 不会发信号 / 标 dirty (由调用方负责).
+    SchemePalette& ensurePaletteForScheme(int schemeIdx);
+
     Project m_project;
     QString m_currentProjectPath;     // M8: 最近 saveProject/loadProject 的路径
     bool    m_dirty{ false };         // 有未保存改动

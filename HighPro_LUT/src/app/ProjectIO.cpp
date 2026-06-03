@@ -1,6 +1,8 @@
 #include "ProjectIO.h"
 #include "core/Project.h"
 #include "core/PathUtil.h"
+#include "core/SchemePalette.h"
+#include "core/LayerData.h"
 
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -41,6 +43,40 @@ CurveParams::Pts ptsFromJson(const QJsonObject& o) {
     for (int i = 0; i < n; ++i) pts.append({ xs[i].toInt(), ys[i].toInt() });
     if (pts.size() < 2) pts = { {0,0}, {255,255} };
     return pts;
+}
+
+// === P0: SchemePalette JSON ===
+QJsonObject paletteToJson(const SchemePalette& p) {
+    QJsonObject o;
+    o["primaryHue"]     = p.primaryHue;
+    o["secondaryHue"]   = p.secondaryHue;
+    o["accentHue"]      = p.accentHue;
+    o["accent2Hue"]     = p.accent2Hue;
+    o["glowHue"]        = p.glowHue;
+    o["metalTone"]      = metalToneToString(p.metal);
+    o["mood"]           = styleMoodToString(p.mood);
+    o["clothingTone"]   = clothingToneToString(p.clothing);
+    o["saturationBias"] = p.saturationBias;
+    o["lightnessBias"]  = p.lightnessBias;
+    return o;
+}
+
+SchemePalette paletteFromJson(const QJsonObject& o) {
+    SchemePalette p;
+    p.primaryHue     = o["primaryHue"].toInt();
+    p.secondaryHue   = o["secondaryHue"].toInt();
+    p.accentHue      = o["accentHue"].toInt();
+    p.accent2Hue     = o["accent2Hue"].toInt();
+    p.glowHue        = o["glowHue"].toInt();
+    p.metal          = metalToneFromString(o["metalTone"].toString());
+    p.mood           = styleMoodFromString(o["mood"].toString());
+    // v5 兼容: 缺字段 → 默认 DarkBlue (老工程会重新走 smart 时刷新)
+    p.clothing       = o.contains("clothingTone")
+                       ? clothingToneFromString(o["clothingTone"].toString())
+                       : ClothingTone::DarkBlue;
+    p.saturationBias = o["saturationBias"].toInt();
+    p.lightnessBias  = o["lightnessBias"].toInt();
+    return p;
 }
 
 } // namespace
@@ -183,6 +219,11 @@ QJsonObject ProjectIO::schemeToJson(const Scheme& s)
         }
         o["layerEffects"] = m;
     }
+
+    // P0: palette 仅在已生成时写出. 缺字段 = 未跑过智能随机.
+    if (s.palette.has_value()) {
+        o["palette"] = paletteToJson(s.palette.value());
+    }
     return o;
 }
 
@@ -205,13 +246,18 @@ Scheme ProjectIO::schemeFromJson(const QJsonObject& o)
             s.layerEffects.insert(it.key(), effectStackFromJson(it.value().toObject()));
         }
     }
+
+    // P0: palette 兼容. 缺字段 → optional 保持空, smart 调用时自动生成.
+    if (o.contains("palette") && o["palette"].isObject()) {
+        s.palette = paletteFromJson(o["palette"].toObject());
+    }
     return s;
 }
 
 QJsonObject ProjectIO::projectToJson(const Project& p)
 {
     QJsonObject o;
-    o["version"] = 1;
+    o["version"] = 2;       // P0: 加 layerSlots / palette
     o["sourceRoot"] = p.sourceRoot;
     o["outputRoot"] = p.outputRoot;
     o["currentAction"] = p.currentAction;
@@ -230,6 +276,15 @@ QJsonObject ProjectIO::projectToJson(const Project& p)
         QJsonArray a;
         for (const QString& k : p.skinSafeLayerKeys) a.append(k);
         o["skinSafeLayerKeys"] = a;
+    }
+    {
+        // P0: layerSlots — { "num_00": "Clothing", ... }
+        QJsonObject m;
+        for (auto it = p.layerSlots.constBegin(); it != p.layerSlots.constEnd(); ++it) {
+            if (it.value() == LayerSlot::Unknown) continue;  // Unknown 不写
+            m[it.key()] = layerSlotToString(it.value());
+        }
+        o["layerSlots"] = m;
     }
     {
         QJsonObject m;
@@ -264,6 +319,26 @@ void ProjectIO::projectFromJson(const QJsonObject& obj, Project& out)
     out.skinSafeLayerKeys.clear();
     for (const auto& v : obj["skinSafeLayerKeys"].toArray()) out.skinSafeLayerKeys.insert(v.toString());
 
+    // P0: layerSlots 兼容. 缺字段 = 旧工程, 走启发式. 值 string 或 int 都接.
+    out.layerSlots.clear();
+    if (obj.contains("layerSlots") && obj["layerSlots"].isObject()) {
+        QJsonObject m = obj["layerSlots"].toObject();
+        for (auto it = m.constBegin(); it != m.constEnd(); ++it) {
+            LayerSlot slot;
+            if (it.value().isString()) {
+                slot = layerSlotFromString(it.value().toString());
+            } else {
+                // 兼容 int (理论上 P0 不写, 防御性留)
+                const int iv = it.value().toInt(0);
+                slot = (iv > 0 && iv <= (int)LayerSlot::WeaponNonMetal)
+                       ? static_cast<LayerSlot>(iv) : LayerSlot::Unknown;
+            }
+            if (slot != LayerSlot::Unknown) {
+                out.layerSlots.insert(it.key(), slot);
+            }
+        }
+    }
+
     out.layerLutPath.clear();
     QJsonObject lp = obj["layerLutPath"].toObject();
     for (auto it = lp.constBegin(); it != lp.constEnd(); ++it) {
@@ -288,7 +363,7 @@ bool ProjectIO::saveToFile(const Project& proj, const QString& path,
 {
     QJsonObject root;
     root["app"] = "HighPro_LUT";
-    root["version"] = 1;
+    root["version"] = 2;        // P0
     root["project"] = projectToJson(proj);
     if (!uiState.isEmpty()) root["ui"] = uiState;
 

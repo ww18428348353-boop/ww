@@ -73,6 +73,8 @@ set(APP_SOURCES
     src/core/CurveSolver.cpp
     src/core/KPoint.h
     src/core/Project.h
+    src/core/SchemePalette.h
+    src/core/SchemePalette.cpp
 
     # render
     src/render/D3D11Context.h

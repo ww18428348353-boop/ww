@@ -8,6 +8,7 @@
 #include <QDir>
 #include <QSet>
 #include <QRandomGenerator>
+#include <QRegularExpression>
 
 namespace HighPro {
 
@@ -167,6 +168,7 @@ bool ProjectController::loadProject(const QString& path, QJsonObject* outUiState
     m_project.currentAddonKey = tmp.currentAddonKey;
     m_project.hiddenLayerKeys = tmp.hiddenLayerKeys;
     m_project.skinSafeLayerKeys = tmp.skinSafeLayerKeys;
+    m_project.layerSlots = tmp.layerSlots;   // P0: 用户手动指定的层语义
     m_project.layerLutPath = tmp.layerLutPath;
     m_project.schemes = tmp.schemes;
 
@@ -610,6 +612,396 @@ void ProjectController::setSchemeLocked(int idx, bool locked)
     sc.locked = locked;
     m_dirty = true;
     emit schemesChanged();
+}
+
+// ===========================================================================
+// P0 智能随机 (Palette + LayerSlot 驱动)
+// ===========================================================================
+
+SchemePalette& ProjectController::ensurePaletteForScheme(int schemeIdx)
+{
+    Q_ASSERT(schemeIdx >= 0 && schemeIdx < m_project.schemes.size());
+    Scheme& sc = m_project.schemes[schemeIdx];
+    if (!sc.palette.has_value()) {
+        sc.palette = generatePalette(schemeIdx, QRandomGenerator::global()->generate());
+    }
+    return sc.palette.value();
+}
+
+void ProjectController::smartRandomizeCurrentLayer()
+{
+    auto* sc = m_project.currentScheme();
+    if (!sc || sc->isBuiltin) return;
+    if (sc->locked) return;
+
+    const QString& k = m_project.currentLayerKey;
+    if (k.isEmpty()) return;
+
+    // 找到对应层 (取 slot 用)
+    const LayerData* layer = nullptr;
+    for (const auto& l : m_project.layers) {
+        if (l.key() == k) { layer = &l; break; }
+    }
+    if (!layer) return;
+
+    // Skin 跳过 (与 randomizeStackBySlot Skin 分支等价, 但提前 short-circuit)
+    if (m_project.isSkinSafe(*layer)) return;
+
+    const SchemePalette& palette = ensurePaletteForScheme(m_project.currentSchemeIndex);
+    const LayerSlot slot = m_project.slotFor(*layer);
+
+    randomizeStackBySlot(sc->layerEffects[k], slot, palette);
+    m_dirty = true;
+    emit effectsChanged();
+}
+
+void ProjectController::smartRandomizeAllLayers()
+{
+    auto* sc = m_project.currentScheme();
+    if (!sc || sc->isBuiltin) return;
+    if (sc->locked) return;
+
+    // 强制重生 palette: "智能所有层 = 换一套完整配色"
+    sc->palette = generatePalette(m_project.currentSchemeIndex,
+                                   QRandomGenerator::global()->generate());
+    const SchemePalette& palette = sc->palette.value();
+
+    int processed = 0;
+    for (const auto& l : m_project.layers) {
+        if (!m_project.isLayerVisible(l)) continue;
+        if (m_project.isSkinSafe(l)) continue;
+        const LayerSlot slot = m_project.slotFor(l);
+        randomizeStackBySlot(sc->layerEffects[l.key()], slot, palette);
+        ++processed;
+    }
+    if (processed > 0) { m_dirty = true; emit effectsChanged(); }
+}
+
+void ProjectController::smartRandomizeAllSchemes(bool includeBaked)
+{
+    int processed = 0;
+    bool anyTagChange = false;
+
+    // 记录当前选中方案名 (重排后用名字找回新 idx)
+    QString currentName;
+    if (m_project.currentSchemeIndex >= 0
+        && m_project.currentSchemeIndex < m_project.schemes.size()) {
+        currentName = m_project.schemes[m_project.currentSchemeIndex].name;
+    }
+
+    for (int i = 0; i < m_project.schemes.size(); ++i) {
+        Scheme& sc = m_project.schemes[i];
+        if (sc.isBuiltin) continue;
+        if (sc.locked) continue;
+        if (sc.isBaked && !includeBaked) continue;
+
+        // 已烘焙降级 (复用旧 randomizeAllSchemes 逻辑)
+        if (sc.isBaked && includeBaked) {
+            sc.isBaked = false;
+            sc.layerLutPath.clear();
+            anyTagChange = true;
+            for (const auto& l : m_project.layers) {
+                if (!sc.layerEffects.contains(l.key())) {
+                    sc.layerEffects.insert(l.key(), EffectStack{});
+                }
+            }
+        }
+
+        // 每方案按 idx 取风格 + 新 seed 抖动. 不复用旧 palette: 智能全部 = 全部重生.
+        sc.palette = generatePalette(i, QRandomGenerator::global()->generate());
+        const SchemePalette& palette = sc.palette.value();
+
+        for (const auto& l : m_project.layers) {
+            if (!m_project.isLayerVisible(l)) continue;
+            if (m_project.isSkinSafe(l)) continue;
+            const LayerSlot slot = m_project.slotFor(l);
+            randomizeStackBySlot(sc.layerEffects[l.key()], slot, palette);
+            ++processed;
+        }
+    }
+
+    // === 重排: 锁住的方案排在前面 (idx 1 起依次), 未锁的排后面 ===
+    // 与旧 randomizeAllSchemes 完全一致. palette 跟着 Scheme 走, 不会串色.
+    bool reordered = false;
+    if (m_project.schemes.size() > 2) {
+        QVector<Scheme> head;   // 本体
+        QVector<Scheme> locked; // 已锁 (在前)
+        QVector<Scheme> rest;   // 未锁 (在后)
+        for (int i = 0; i < m_project.schemes.size(); ++i) {
+            const auto& sc = m_project.schemes[i];
+            if (sc.isBuiltin)    head.push_back(sc);
+            else if (sc.locked)  locked.push_back(sc);
+            else                 rest.push_back(sc);
+        }
+        QVector<Scheme> merged;
+        merged.reserve(m_project.schemes.size());
+        merged += head; merged += locked; merged += rest;
+        for (int i = 0; i < merged.size(); ++i) {
+            if (merged[i].name != m_project.schemes[i].name) { reordered = true; break; }
+        }
+        if (reordered) {
+            m_project.schemes = std::move(merged);
+            for (int i = 0; i < m_project.schemes.size(); ++i) {
+                Scheme& sc = m_project.schemes[i];
+                if (sc.isBuiltin) continue;
+                QString rest = sc.name;
+                QRegularExpression re("^方案\\s*\\d+\\s*-\\s*");
+                rest.remove(re);
+                sc.name = QString("方案 %1 - %2").arg(i).arg(rest);
+            }
+            QRegularExpression reCurr("^方案\\s*\\d+\\s*-\\s*");
+            QString currTail = currentName; currTail.remove(reCurr);
+            int newIdx = 0;
+            for (int i = 0; i < m_project.schemes.size(); ++i) {
+                QString tail = m_project.schemes[i].name;
+                tail.remove(reCurr);
+                if (tail == currTail) { newIdx = i; break; }
+            }
+            m_project.currentSchemeIndex = newIdx;
+            anyTagChange = true;
+        }
+    }
+
+    if (processed > 0 || anyTagChange) {
+        m_dirty = true;
+        if (anyTagChange) emit schemesChanged();
+        if (processed > 0) emit effectsChanged();
+        if (reordered) emit currentSchemeChanged();
+    }
+}
+
+// ===========================================================================
+// 智能 + 随机 混合 (每个参数 = 智能 * 0.5 + 随机 * 0.5 中间态)
+// ===========================================================================
+namespace {
+
+// hue 走最短路径平均: [-180, 180] 范围.
+//   e.g. -170 与 +170 直接 (a+b)/2 = 0, 但实际最短路径是 180.
+int averageHueShortPath(int a, int b)
+{
+    a = std::clamp(a, -180, 180);
+    b = std::clamp(b, -180, 180);
+    int diff = b - a;
+    if (diff >  180) diff -= 360;
+    if (diff < -180) diff += 360;
+    int mid = a + diff / 2;
+    if (mid >  180) mid -= 360;
+    if (mid < -180) mid += 360;
+    return mid;
+}
+
+inline int blendInt(int x, int y) { return (x + y) / 2; }
+
+// 把两份 EffectStack 按 50/50 插值到 out.
+//   - enabled[i]: OR (任一开启则开)
+//   - 数值参数: 算术平均
+//   - hue: 最短路径平均
+//   - curves / chMix.monochrome / photoFilter.preset: 智能版优先
+//   - shadowProtectThreshold: 智能版优先
+void blendStack(const EffectStack& smart, const EffectStack& legacy, EffectStack& out)
+{
+    out.reset();
+
+    // enabled OR
+    for (size_t i = 0; i < EffectStack::kCount; ++i) {
+        out.enabled[i] = smart.enabled[i] || legacy.enabled[i];
+    }
+    out.shadowProtectThreshold = smart.shadowProtectThreshold;
+
+    // HSL
+    out.hsl.hue        = averageHueShortPath(smart.hsl.hue, legacy.hsl.hue);
+    out.hsl.saturation = blendInt(smart.hsl.saturation, legacy.hsl.saturation);
+    out.hsl.lightness  = blendInt(smart.hsl.lightness,  legacy.hsl.lightness);
+
+    // BrtCtr
+    out.brtCtr.brightness = blendInt(smart.brtCtr.brightness, legacy.brtCtr.brightness);
+    out.brtCtr.contrast   = blendInt(smart.brtCtr.contrast,   legacy.brtCtr.contrast);
+
+    // Curves: 智能版优先 (智能版才用预设曲线; 旧随机几乎不开曲线, 强行插值会破坏曲线形状)
+    out.curves = smart.curves;
+
+    // ChMix: 数值平均
+    out.chMix.rr = blendInt(smart.chMix.rr, legacy.chMix.rr);
+    out.chMix.rg = blendInt(smart.chMix.rg, legacy.chMix.rg);
+    out.chMix.rb = blendInt(smart.chMix.rb, legacy.chMix.rb);
+    out.chMix.r_const = blendInt(smart.chMix.r_const, legacy.chMix.r_const);
+    out.chMix.gr = blendInt(smart.chMix.gr, legacy.chMix.gr);
+    out.chMix.gg = blendInt(smart.chMix.gg, legacy.chMix.gg);
+    out.chMix.gb = blendInt(smart.chMix.gb, legacy.chMix.gb);
+    out.chMix.g_const = blendInt(smart.chMix.g_const, legacy.chMix.g_const);
+    out.chMix.br = blendInt(smart.chMix.br, legacy.chMix.br);
+    out.chMix.bg = blendInt(smart.chMix.bg, legacy.chMix.bg);
+    out.chMix.bb = blendInt(smart.chMix.bb, legacy.chMix.bb);
+    out.chMix.b_const = blendInt(smart.chMix.b_const, legacy.chMix.b_const);
+    out.chMix.monochrome = smart.chMix.monochrome;
+
+    // ColorBal: 9 个分量 + preserveLuma 平均
+    out.colorBal.sR = blendInt(smart.colorBal.sR, legacy.colorBal.sR);
+    out.colorBal.sG = blendInt(smart.colorBal.sG, legacy.colorBal.sG);
+    out.colorBal.sB = blendInt(smart.colorBal.sB, legacy.colorBal.sB);
+    out.colorBal.mR = blendInt(smart.colorBal.mR, legacy.colorBal.mR);
+    out.colorBal.mG = blendInt(smart.colorBal.mG, legacy.colorBal.mG);
+    out.colorBal.mB = blendInt(smart.colorBal.mB, legacy.colorBal.mB);
+    out.colorBal.hR = blendInt(smart.colorBal.hR, legacy.colorBal.hR);
+    out.colorBal.hG = blendInt(smart.colorBal.hG, legacy.colorBal.hG);
+    out.colorBal.hB = blendInt(smart.colorBal.hB, legacy.colorBal.hB);
+    out.colorBal.preserveLuma = smart.colorBal.preserveLuma;
+
+    // PhotoFilter:
+    //   density 取算术平均;
+    //   preset/filterR/G/B 智能版优先 (RGB 三通道独立插值会出怪色)
+    out.photoFilter.preset      = smart.photoFilter.preset;
+    out.photoFilter.filterR     = smart.photoFilter.filterR;
+    out.photoFilter.filterG     = smart.photoFilter.filterG;
+    out.photoFilter.filterB     = smart.photoFilter.filterB;
+    out.photoFilter.density     = blendInt(smart.photoFilter.density, legacy.photoFilter.density);
+    out.photoFilter.preserveLuma = smart.photoFilter.preserveLuma;
+
+    // Vibrance
+    out.vibrance.vibrance   = blendInt(smart.vibrance.vibrance,   legacy.vibrance.vibrance);
+    out.vibrance.saturation = blendInt(smart.vibrance.saturation, legacy.vibrance.saturation);
+}
+
+} // namespace
+
+void ProjectController::mixRandomizeAllSchemes(bool includeBaked)
+{
+    int processed = 0;
+    bool anyTagChange = false;
+
+    QString currentName;
+    if (m_project.currentSchemeIndex >= 0
+        && m_project.currentSchemeIndex < m_project.schemes.size()) {
+        currentName = m_project.schemes[m_project.currentSchemeIndex].name;
+    }
+
+    for (int i = 0; i < m_project.schemes.size(); ++i) {
+        Scheme& sc = m_project.schemes[i];
+        if (sc.isBuiltin) continue;
+        if (sc.locked) continue;
+        if (sc.isBaked && !includeBaked) continue;
+
+        if (sc.isBaked && includeBaked) {
+            sc.isBaked = false;
+            sc.layerLutPath.clear();
+            anyTagChange = true;
+            for (const auto& l : m_project.layers) {
+                if (!sc.layerEffects.contains(l.key())) {
+                    sc.layerEffects.insert(l.key(), EffectStack{});
+                }
+            }
+        }
+
+        // 该方案生成 palette (供 smart 用)
+        sc.palette = generatePalette(i, QRandomGenerator::global()->generate());
+        const SchemePalette& palette = sc.palette.value();
+
+        for (const auto& l : m_project.layers) {
+            if (!m_project.isLayerVisible(l)) continue;
+            if (m_project.isSkinSafe(l)) continue;
+
+            const LayerSlot slot = m_project.slotFor(l);
+
+            // 生成两份独立的栈, 50/50 插值
+            EffectStack smartStack;
+            randomizeStackBySlot(smartStack, slot, palette,
+                                 QRandomGenerator::global()->generate());
+
+            EffectStack legacyStack;
+            randomizeStack(legacyStack, QRandomGenerator::global()->generate());
+
+            EffectStack blended;
+            blendStack(smartStack, legacyStack, blended);
+
+            sc.layerEffects[l.key()] = blended;
+            ++processed;
+        }
+    }
+
+    // 重排 (跟 smartRandomizeAllSchemes 一致)
+    bool reordered = false;
+    if (m_project.schemes.size() > 2) {
+        QVector<Scheme> head;
+        QVector<Scheme> locked;
+        QVector<Scheme> rest;
+        for (int i = 0; i < m_project.schemes.size(); ++i) {
+            const auto& sc = m_project.schemes[i];
+            if (sc.isBuiltin)    head.push_back(sc);
+            else if (sc.locked)  locked.push_back(sc);
+            else                 rest.push_back(sc);
+        }
+        QVector<Scheme> merged;
+        merged.reserve(m_project.schemes.size());
+        merged += head; merged += locked; merged += rest;
+        for (int i = 0; i < merged.size(); ++i) {
+            if (merged[i].name != m_project.schemes[i].name) { reordered = true; break; }
+        }
+        if (reordered) {
+            m_project.schemes = std::move(merged);
+            for (int i = 0; i < m_project.schemes.size(); ++i) {
+                Scheme& sc = m_project.schemes[i];
+                if (sc.isBuiltin) continue;
+                QString rest = sc.name;
+                QRegularExpression re("^方案\\s*\\d+\\s*-\\s*");
+                rest.remove(re);
+                sc.name = QString("方案 %1 - %2").arg(i).arg(rest);
+            }
+            QRegularExpression reCurr("^方案\\s*\\d+\\s*-\\s*");
+            QString currTail = currentName; currTail.remove(reCurr);
+            int newIdx = 0;
+            for (int i = 0; i < m_project.schemes.size(); ++i) {
+                QString tail = m_project.schemes[i].name;
+                tail.remove(reCurr);
+                if (tail == currTail) { newIdx = i; break; }
+            }
+            m_project.currentSchemeIndex = newIdx;
+            anyTagChange = true;
+        }
+    }
+
+    if (processed > 0 || anyTagChange) {
+        m_dirty = true;
+        if (anyTagChange) emit schemesChanged();
+        if (processed > 0) emit effectsChanged();
+        if (reordered) emit currentSchemeChanged();
+    }
+}
+
+void ProjectController::setLayerSlot(const QString& layerKey, LayerSlot slot)
+{
+    if (layerKey.isEmpty()) return;
+
+    bool changed = false;
+
+    if (slot == LayerSlot::Unknown) {
+        // 清除手动指定
+        if (m_project.layerSlots.remove(layerKey)) changed = true;
+    } else {
+        const LayerSlot old = m_project.layerSlots.value(layerKey, LayerSlot::Unknown);
+        if (old != slot) {
+            m_project.layerSlots.insert(layerKey, slot);
+            changed = true;
+        }
+    }
+
+    // skinSafe 双向同步:
+    //   slot == Skin    → 强制加入 skinSafeLayerKeys
+    //   slot != Skin && != Unknown → 取消 skinSafeLayerKeys (用户显式选了别的)
+    //   slot == Unknown → 不动 skinSafeLayerKeys (清除指定不影响保护状态)
+    if (slot == LayerSlot::Skin) {
+        if (!m_project.skinSafeLayerKeys.contains(layerKey)) {
+            m_project.skinSafeLayerKeys.insert(layerKey);
+            changed = true;
+        }
+    } else if (slot != LayerSlot::Unknown) {
+        if (m_project.skinSafeLayerKeys.remove(layerKey)) changed = true;
+    }
+
+    if (changed) {
+        m_dirty = true;
+        emit visibilityChanged();   // 复用: LayerTreePanel 刷 emoji 前缀
+        emit effectsChanged();      // 缩略图重烘 (slot 变了, 智能随机结果会变)
+    }
 }
 
 } // namespace HighPro
