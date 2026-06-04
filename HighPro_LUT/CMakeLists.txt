@@ -117,6 +117,8 @@ set(APP_SOURCES
     # app
     src/app/AppSettings.h
     src/app/AppSettings.cpp
+    src/app/AppTheme.h
+    src/app/AppTheme.cpp
     src/app/ProjectController.h
     src/app/ProjectController.cpp
     src/app/ProjectIO.h

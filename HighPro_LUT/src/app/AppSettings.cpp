@@ -35,6 +35,10 @@ void AppSettings::load()
     m_bgImage = s.value("bgImage").toString();
     m_fps     = s.value("fps", m_fps).toInt();
     s.endGroup();
+
+    s.beginGroup("Theme");
+    m_themeDark = s.value("dark", m_themeDark).toBool();
+    s.endGroup();
 }
 
 void AppSettings::save()
@@ -59,6 +63,10 @@ void AppSettings::save()
     s.setValue("bgColor", m_bgColor);
     s.setValue("bgImage", m_bgImage);
     s.setValue("fps",     m_fps);
+    s.endGroup();
+
+    s.beginGroup("Theme");
+    s.setValue("dark", m_themeDark);
     s.endGroup();
 }
 

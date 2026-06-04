@@ -60,15 +60,10 @@ bool exportOneScheme(const Project& project, const Scheme& sc, int schemeIdx,
     EffectStack identity;
 
     for (const auto& layer : project.layers) {
-        if (!project.isLayerVisible(layer)) {
-            r.skippedCount++;
-            continue;
-        }
-        // M7: 肤色保护层 → 不导出 LUT (该层永远走本体)
-        if (project.isSkinSafe(layer)) {
-            r.skippedCount++;
-            continue;
-        }
+        const bool hidden = !project.isLayerVisible(layer);
+        // M7: 肤色保护层 / 隐藏层 → 导出默认 identity LUT (确保该层 add_lut 文件存在)
+        const bool skinSafe = project.isSkinSafe(layer);
+        const bool forceIdentity = skinSafe || hidden;
 
         QString dir = QDir(outRoot).filePath(layer.displayName + "/add_lut");
         if (!PathUtil::ensureDir(dir)) {
@@ -77,7 +72,7 @@ bool exportOneScheme(const Project& project, const Scheme& sc, int schemeIdx,
         }
         QString outPath = QDir(dir).filePath(fileName);
 
-        if (sc.isBaked) {
+        if (sc.isBaked && !forceIdentity) {
             // 已烘焙方案: 直接拷源 add_lut PNG (该层若没对应 LUT 则跳过)
             const QString srcLut = sc.layerLutPath.value(layer.key());
             if (srcLut.isEmpty()) {
@@ -97,7 +92,8 @@ bool exportOneScheme(const Project& project, const Scheme& sc, int schemeIdx,
             }
         } else {
             // 用户可编辑方案: 走 LutBaker
-            const EffectStack* stk = project.effectsForIn(sc, layer);
+            // 肤色保护层/隐藏层强制用 identity (不变色), 确保 add_lut 文件存在
+            const EffectStack* stk = forceIdentity ? nullptr : project.effectsForIn(sc, layer);
             const EffectStack& use = stk ? *stk : identity;
             QString err;
             if (!baker.bake(use, &err)) {

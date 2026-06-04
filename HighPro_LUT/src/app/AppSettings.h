@@ -63,6 +63,11 @@ public:
     int     fps() const                 { return m_fps; }
     void    setFps(int v)               { m_fps = v; }
 
+    // === 主题 ===
+    // true = 暗色 Fusion (默认), false = 浅色 Fusion. 视图菜单可切换并持久化.
+    bool    themeDark() const           { return m_themeDark; }
+    void    setThemeDark(bool v)        { m_themeDark = v; }
+
 private:
     AppSettings() = default;
     Q_DISABLE_COPY_MOVE(AppSettings)
@@ -81,6 +86,8 @@ private:
     QColor   m_bgColor{ 60, 60, 60 };       // R60G60B60
     QString  m_bgImage;
     int      m_fps{ 10 };                   // 默认 10 fps
+
+    bool     m_themeDark{ true };           // 默认暗色主题
 };
 
 } // namespace HighPro

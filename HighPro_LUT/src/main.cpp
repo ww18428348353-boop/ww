@@ -1,5 +1,6 @@
 #include "ui/MainWindow.h"
 #include "app/AppSettings.h"
+#include "app/AppTheme.h"
 #include "app/ProjectController.h"
 
 #include <QApplication>
@@ -21,13 +22,17 @@ int main(int argc, char* argv[])
     QApplication::setOrganizationName("HighPro");
     QApplication::setApplicationVersion("1.0.0");
 
-    // Fusion 风格 + 暗色调更适合调色工具
-    QApplication::setStyle(QStyleFactory::create("Fusion"));
-
     // 应用图标 (任务栏 / Alt+Tab / 窗口左上)
     QApplication::setWindowIcon(QIcon(":/icons/app.ico"));
 
     HighPro::AppSettings::instance().load();
+
+    // 主题: 默认暗色, 视图菜单可切. 必须在 MainWindow 创建前 apply,
+    //       这样所有子 widget 第一次 polish 就走对色板, 避免局部白底闪烁.
+    HighPro::AppTheme::apply(
+        HighPro::AppSettings::instance().themeDark()
+            ? HighPro::AppTheme::Mode::Dark
+            : HighPro::AppTheme::Mode::Light);
 
     HighPro::MainWindow win;
     win.show();

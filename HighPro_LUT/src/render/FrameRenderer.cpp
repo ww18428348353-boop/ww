@@ -328,7 +328,8 @@ void FrameRenderer::render(ID3D11RenderTargetView* rtv, int rtvWidth, int rtvHei
 
 void FrameRenderer::renderCells(ID3D11RenderTargetView* rtv, int rtvWidth, int rtvHeight,
                                 const QColor& bgColor,
-                                const std::vector<Cell>& cells)
+                                const std::vector<Cell>& cells,
+                                const std::shared_ptr<D3D11Texture>& bgImage)
 {
     if (!m_ready || !rtv || rtvWidth <= 0 || rtvHeight <= 0) return;
     auto* dc = D3D11Context::instance().context();
@@ -343,6 +344,11 @@ void FrameRenderer::renderCells(ID3D11RenderTargetView* rtv, int rtvWidth, int r
         1.0f,
     };
     dc->ClearRenderTargetView(rtv, bg);
+
+    // 背景图: 在 clear 之后、cells 之前绘制 (保持原始比例, 不压缩)
+    if (bgImage && bgImage->isValid()) {
+        renderBgImage(rtv, rtvWidth, rtvHeight, bgImage);
+    }
 
     ID3D11RenderTargetView* rtvs[] = { rtv };
     dc->OMSetRenderTargets(1, rtvs, nullptr);
@@ -594,6 +600,85 @@ const FrameRenderer::LabelTex* FrameRenderer::getOrCreateLabel(const QString& te
     if (m_labelCache.size() > 100) m_labelCache.clear();
     auto inserted = m_labelCache.insert(key, std::move(lt));
     return &inserted.value();
+}
+
+void FrameRenderer::renderBgImage(ID3D11RenderTargetView* rtv, int rtvWidth, int rtvHeight,
+                                  const std::shared_ptr<D3D11Texture>& tex)
+{
+    if (!m_ready || !rtv || !tex || !tex->isValid()) return;
+    if (rtvWidth <= 0 || rtvHeight <= 0) return;
+    auto* dc = D3D11Context::instance().context();
+    if (!dc) return;
+
+    const int tw = tex->width();
+    const int th = tex->height();
+    if (tw <= 0 || th <= 0) return;
+
+    // "Cover" 模式: 保持图片宽高比, 缩放使整个画布被覆盖 (超出裁剪).
+    // 即取 max(scaleX, scaleY) 使图片至少覆盖整个 RTV.
+    const float vpW = (float)rtvWidth, vpH = (float)rtvHeight;
+    const float scaleX = vpW / (float)tw;
+    const float scaleY = vpH / (float)th;
+    const float scale = qMax(scaleX, scaleY);
+
+    // 缩放后图片像素大小
+    const float scaledW = tw * scale;
+    const float scaledH = th * scale;
+
+    // 超出画布的部分通过 UV 裁剪 (居中)
+    // UV 范围: 只显示画布能容纳的部分
+    float u0 = (scaledW - vpW) / (2.0f * scaledW);
+    float v0 = (scaledH - vpH) / (2.0f * scaledH);
+    float u1 = 1.0f - u0;
+    float v1 = 1.0f - v0;
+
+    // 画满整个 viewport
+    int drawX = 0, drawY = 0;
+    int drawW = rtvWidth, drawH = rtvHeight;
+
+    D3D11_VIEWPORT vp{};
+    vp.TopLeftX = 0; vp.TopLeftY = 0;
+    vp.Width = vpW; vp.Height = vpH;
+    vp.MaxDepth = 1;
+    dc->RSSetViewports(1, &vp);
+
+    ID3D11RenderTargetView* rtvs[] = { rtv };
+    dc->OMSetRenderTargets(1, rtvs, nullptr);
+    dc->IASetInputLayout(nullptr);
+    dc->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    dc->RSSetState(m_rasterState.Get());
+    dc->OMSetDepthStencilState(m_depthOff.Get(), 0);
+    const float blendFactor[4] = { 0,0,0,0 };
+    dc->OMSetBlendState(m_blendOver.Get(), blendFactor, 0xffffffff);
+
+    ID3D11Buffer* cbs0[] = { m_cb.Get() };
+    dc->VSSetConstantBuffers(0, 1, cbs0);
+    dc->PSSetConstantBuffers(0, 1, cbs0);
+
+    QuadCB qb{};
+    qb.uvRect[0] = u0; qb.uvRect[1] = v1; qb.uvRect[2] = u1; qb.uvRect[3] = v0;
+    qb.posRect[0] = (float)drawX / vpW * 2 - 1;
+    qb.posRect[1] = 1 - (float)(drawY + drawH) / vpH * 2;
+    qb.posRect[2] = (float)(drawX + drawW) / vpW * 2 - 1;
+    qb.posRect[3] = 1 - (float)drawY / vpH * 2;
+    qb.tint[0] = qb.tint[1] = qb.tint[2] = qb.tint[3] = 1.0f;
+
+    D3D11_MAPPED_SUBRESOURCE map{};
+    if (SUCCEEDED(dc->Map(m_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+        memcpy(map.pData, &qb, sizeof(qb));
+        dc->Unmap(m_cb.Get(), 0);
+    }
+
+    dc->VSSetShader(m_shaderPass.vs(), nullptr, 0);
+    dc->PSSetShader(m_shaderPass.ps(), nullptr, 0);
+
+    ID3D11SamplerState* samps[] = { m_samplerLinear.Get() };
+    dc->PSSetSamplers(0, 1, samps);
+
+    ID3D11ShaderResourceView* srvs[] = { tex->srv() };
+    dc->PSSetShaderResources(0, 1, srvs);
+
+    dc->Draw(6, 0);
 }
 
 } // namespace HighPro

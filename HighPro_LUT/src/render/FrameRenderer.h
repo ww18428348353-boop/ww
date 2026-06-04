@@ -71,7 +71,12 @@ public:
     };
     void renderCells(ID3D11RenderTargetView* rtv, int rtvWidth, int rtvHeight,
                      const QColor& bgColor,
-                     const std::vector<Cell>& cells);
+                     const std::vector<Cell>& cells,
+                     const std::shared_ptr<D3D11Texture>& bgImage = nullptr);
+
+    // 在 RTV 上绘制背景图 (保持原始宽高比, 居中, 不拉伸/压缩).
+    void renderBgImage(ID3D11RenderTargetView* rtv, int rtvWidth, int rtvHeight,
+                       const std::shared_ptr<D3D11Texture>& tex);
 
 private:
     bool buildPipeline(QString* errorOut);

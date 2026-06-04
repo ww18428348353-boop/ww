@@ -26,6 +26,9 @@
 #include <QShortcut>
 #include <QKeySequence>
 #include <QApplication>
+#include <QScrollArea>
+#include <QFrame>
+#include <QSizePolicy>
 #include <QDebug>
 #include <cmath>
 
@@ -35,8 +38,17 @@ PreviewPanel::PreviewPanel(QWidget* parent) : QWidget(parent)
 {
     m_renderer = std::make_unique<FrameRenderer>();
 
+    // 让面板自身接受焦点, 点击空白区域时 SpinBox/LineEdit 自动失焦
+    setFocusPolicy(Qt::ClickFocus);
+
     buildUi();
     connectSignals();
+
+    // 恢复上次保存的背景图
+    m_bgImagePath = AppSettings::instance().bgImage();
+    if (!m_bgImagePath.isEmpty()) {
+        m_bgImageTex = FrameLoader::instance().get(m_bgImagePath);
+    }
 
     // 播放定时器
     m_playTimer.setInterval(1000 / qMax(1, AppSettings::instance().fps()));
@@ -80,14 +92,19 @@ void PreviewPanel::buildUi()
 
     // 1) 画布
     m_canvas = new D3DWidget(this);
+    m_canvas->setFocusPolicy(Qt::ClickFocus);
     m_canvas->setClearColor(AppSettings::instance().bgColor());
     m_canvas->setRenderCallback([this](ID3D11RenderTargetView* rtv, int w, int h) {
         render(rtv, w, h);
     });
     root->addWidget(m_canvas, 1);
 
-    // 2) 控制条 (两行)
-    auto* line1 = new QHBoxLayout();
+    // 2) 控制条 (两行) — 包在 QScrollArea 里, 1K 屏幕不被挤扁
+    auto* line1Container = new QWidget(this);
+    line1Container->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    auto* line1 = new QHBoxLayout(line1Container);
+    line1->setContentsMargins(0, 2, 0, 2);
+    line1->setSizeConstraint(QLayout::SetMinimumSize);
     line1->setSpacing(6);
 
     line1->addWidget(new QLabel(QStringLiteral("动作:"), this));
@@ -207,7 +224,17 @@ void PreviewPanel::buildUi()
     line1->addWidget(m_hideUnlockedBtn);
 
     line1->addStretch(1);
-    root->addLayout(line1);
+
+    // 用 QScrollArea 包裹 line1Container, 低分辨率屏幕可水平滚动
+    auto* line1Scroll = new QScrollArea(this);
+    line1Scroll->setWidget(line1Container);
+    line1Scroll->setWidgetResizable(false);
+    line1Scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    line1Scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    line1Scroll->setFrameShape(QFrame::NoFrame);
+    line1Scroll->setFixedHeight(line1Container->sizeHint().height() + 4);
+    line1Scroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    root->addWidget(line1Scroll);
 
     // 第二行: 背景
     auto* line2 = new QHBoxLayout();
@@ -259,6 +286,101 @@ void PreviewPanel::buildUi()
 
     line3->addStretch(1);
     root->addLayout(line3);
+
+    // === 全屏模式下 画布下方 智能/随机/重置 按钮区 (默认隐藏, 全屏时显示) ===
+    // 布局: 3 行 (智能 / 随机 / 重置), 与截图三对齐
+    m_fullscreenBtnBar = new QWidget(this);
+    m_fullscreenBtnBar->setObjectName("FullscreenBtnBar");
+    auto* fsVBox = new QVBoxLayout(m_fullscreenBtnBar);
+    fsVBox->setContentsMargins(8, 6, 8, 6);
+    fsVBox->setSpacing(4);
+
+    // 通用按钮样式
+    const QString kSmartStyle = QStringLiteral(
+        "QPushButton { border: 1px solid #4a7fbf; background: #283848; color: #ddd;"
+        " padding: 4px 12px; border-radius: 3px; font-size: 12px; }"
+        "QPushButton:hover { background: #344a60; }");
+    const QString kMixStyle = QStringLiteral(
+        "QPushButton { border: 1px solid #9060b8; background: #382848; color: #ddd;"
+        " padding: 4px 12px; border-radius: 3px; font-size: 12px; }"
+        "QPushButton:hover { background: #4a3860; }");
+    const QString kRandStyle = QStringLiteral(
+        "QPushButton { border: 1px solid #555; background: #2e2e2e; color: #ccc;"
+        " padding: 4px 12px; border-radius: 3px; font-size: 12px; }"
+        "QPushButton:hover { background: #3a3a3a; }");
+    const QString kResetStyle = QStringLiteral(
+        "QPushButton { border: 1px solid #555; background: #2e2e2e; color: #bbb;"
+        " padding: 4px 12px; border-radius: 3px; font-size: 12px; }"
+        "QPushButton:hover { background: #3a3a3a; }");
+
+    // ── 行 1: 智能 ──
+    auto* row1 = new QHBoxLayout();
+    row1->setSpacing(8);
+    auto* fsSmartAll = new QPushButton(QStringLiteral("\xF0\x9F\x8E\xA8 智能所有层"), m_fullscreenBtnBar);
+    auto* fsSmartEditable = new QPushButton(QStringLiteral("\xF0\x9F\x8E\xA8 智能可编辑"), m_fullscreenBtnBar);
+    auto* fsSmartEvery = new QPushButton(QStringLiteral("\xF0\x9F\x8E\xA8 智能全部"), m_fullscreenBtnBar);
+    auto* fsMixEvery = new QPushButton(QStringLiteral("\xF0\x9F\x8E\xA8\xF0\x9F\x8E\xB2 智能+随机"), m_fullscreenBtnBar);
+    for (auto* b : { fsSmartAll, fsSmartEditable, fsSmartEvery }) b->setStyleSheet(kSmartStyle);
+    fsMixEvery->setStyleSheet(kMixStyle);
+    for (auto* b : { fsSmartAll, fsSmartEditable, fsSmartEvery, fsMixEvery }) {
+        b->setFixedHeight(30);
+        row1->addWidget(b);
+    }
+    row1->addStretch(1);
+    fsVBox->addLayout(row1);
+
+    // ── 行 2: 随机 ──
+    auto* row2 = new QHBoxLayout();
+    row2->setSpacing(8);
+    auto* fsRandAll = new QPushButton(QStringLiteral("\xF0\x9F\x8E\xB2 随机所有层"), m_fullscreenBtnBar);
+    auto* fsRandEditable = new QPushButton(QStringLiteral("\xF0\x9F\x8E\xB2 随机可编辑"), m_fullscreenBtnBar);
+    auto* fsRandEvery = new QPushButton(QStringLiteral("\xF0\x9F\x8E\xB2 随机全部"), m_fullscreenBtnBar);
+    for (auto* b : { fsRandAll, fsRandEditable, fsRandEvery }) {
+        b->setStyleSheet(kRandStyle);
+        b->setFixedHeight(30);
+        row2->addWidget(b);
+    }
+    row2->addStretch(1);
+    fsVBox->addLayout(row2);
+
+    // ── 行 3: 重置 ──
+    auto* row3 = new QHBoxLayout();
+    row3->setSpacing(8);
+    auto* fsResetAll = new QPushButton(QStringLiteral("↺ 重置所有层"), m_fullscreenBtnBar);
+    auto* fsResetEditable = new QPushButton(QStringLiteral("↺ 重置可编辑"), m_fullscreenBtnBar);
+    auto* fsResetEvery = new QPushButton(QStringLiteral("↺ 重置全部"), m_fullscreenBtnBar);
+    for (auto* b : { fsResetAll, fsResetEditable, fsResetEvery }) {
+        b->setStyleSheet(kResetStyle);
+        b->setFixedHeight(30);
+        row3->addWidget(b);
+    }
+    row3->addStretch(1);
+    fsVBox->addLayout(row3);
+
+    // 连接信号 → ProjectController
+    connect(fsSmartAll, &QPushButton::clicked, this, []{
+        ProjectController::instance().smartRandomizeAllLayers(); });
+    connect(fsSmartEditable, &QPushButton::clicked, this, []{
+        ProjectController::instance().smartRandomizeAllSchemes(false); });
+    connect(fsSmartEvery, &QPushButton::clicked, this, []{
+        ProjectController::instance().smartRandomizeAllSchemes(true); });
+    connect(fsMixEvery, &QPushButton::clicked, this, []{
+        ProjectController::instance().mixRandomizeAllSchemes(true); });
+    connect(fsRandAll, &QPushButton::clicked, this, []{
+        ProjectController::instance().randomizeAllLayers(); });
+    connect(fsRandEditable, &QPushButton::clicked, this, []{
+        ProjectController::instance().randomizeAllSchemes(false); });
+    connect(fsRandEvery, &QPushButton::clicked, this, []{
+        ProjectController::instance().randomizeAllSchemes(true); });
+    connect(fsResetAll, &QPushButton::clicked, this, []{
+        ProjectController::instance().resetAllLayerEffects(); });
+    connect(fsResetEditable, &QPushButton::clicked, this, []{
+        ProjectController::instance().resetAllSchemesEffects(false); });
+    connect(fsResetEvery, &QPushButton::clicked, this, []{
+        ProjectController::instance().resetAllSchemesEffects(true); });
+
+    m_fullscreenBtnBar->setVisible(false);  // 默认隐藏, 全屏时显示
+    root->addWidget(m_fullscreenBtnBar);
 
     // toolbar 底部留白 50px (避让用户视线 / 美观)
     auto* toolbarPad = new QWidget(this);
@@ -344,6 +466,8 @@ void PreviewPanel::connectSignals()
                 for (auto* d : allDocks) d->hide();
                 mw->showFullScreen();
                 mw->setUpdatesEnabled(true);
+                // 全屏时显示 智能/随机/重置 按钮行
+                if (m_fullscreenBtnBar) m_fullscreenBtnBar->setVisible(true);
             } else {
                 Qt::WindowStates ws = (Qt::WindowStates)mw->property(kPrevWinState).toInt();
                 ws &= ~Qt::WindowFullScreen;
@@ -357,6 +481,8 @@ void PreviewPanel::connectSignals()
                     }
                 }
                 mw->setUpdatesEnabled(true);
+                // 退出全屏时隐藏
+                if (m_fullscreenBtnBar) m_fullscreenBtnBar->setVisible(false);
             }
         });
     }
@@ -488,12 +614,17 @@ void PreviewPanel::onPickBgImage()
         QStringLiteral("Images (*.png *.jpg *.jpeg *.bmp *.tga)"));
     if (p.isEmpty()) return;
     AppSettings::instance().setBgImage(p);
-    // M5 渲染合成时使用 (一期暂只更新设置)
+    m_bgImagePath = p;
+    m_bgImageTex = FrameLoader::instance().get(p);
+    if (m_canvas) m_canvas->requestRender();
 }
 
 void PreviewPanel::onClearBgImage()
 {
     AppSettings::instance().setBgImage(QString());
+    m_bgImagePath.clear();
+    m_bgImageTex.reset();
+    if (m_canvas) m_canvas->requestRender();
 }
 
 void PreviewPanel::onTick()
@@ -750,7 +881,7 @@ void PreviewPanel::render(ID3D11RenderTargetView* rtv, int w, int h)
     // 没方案 → 单 cell 整 viewport, 啥都不画 (clear 即可)
     if (proj.layers.isEmpty() || proj.schemes.isEmpty()) {
         std::vector<FrameRenderer::Cell> empty;
-        m_renderer->renderCells(rtv, w, h, AppSettings::instance().bgColor(), empty);
+        m_renderer->renderCells(rtv, w, h, AppSettings::instance().bgColor(), empty, m_bgImageTex);
         return;
     }
 
@@ -955,7 +1086,7 @@ void PreviewPanel::render(ID3D11RenderTargetView* rtv, int w, int h)
         cells.push_back(std::move(c));
     }
 
-    m_renderer->renderCells(rtv, w, h, AppSettings::instance().bgColor(), cells);
+    m_renderer->renderCells(rtv, w, h, AppSettings::instance().bgColor(), cells, m_bgImageTex);
 }
 
 } // namespace HighPro

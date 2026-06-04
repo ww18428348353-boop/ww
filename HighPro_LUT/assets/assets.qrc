@@ -6,5 +6,8 @@
         <file alias="shaders/recolor.hlsl">shaders/recolor.hlsl</file>
         <file alias="shaders/effect_chain.hlsl">shaders/effect_chain.hlsl</file>
         <file alias="icons/app.ico">icons/app.ico</file>
+        <file alias="icons/check_orange.svg">icons/check_orange.svg</file>
+        <file alias="icons/arrow_up.svg">icons/arrow_up.svg</file>
+        <file alias="icons/arrow_down.svg">icons/arrow_down.svg</file>
     </qresource>
 </RCC>

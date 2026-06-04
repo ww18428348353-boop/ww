@@ -17,6 +17,7 @@ class QCheckBox;
 namespace HighPro {
 
 class D3DWidget;
+class D3D11Texture;
 class FrameRenderer;
 
 // 中央预览面板:
@@ -102,6 +103,13 @@ private:
     // M5: 选中标识闪烁
     QTimer        m_blinkTimer;
     int           m_blinkPhaseMs = 0;
+
+    // 全屏模式下 画布下方的 智能/随机/重置 快捷按钮行
+    QWidget*      m_fullscreenBtnBar{ nullptr };
+
+    // 背景图: 按原始比例绘制 (不拉伸), 居中显示
+    QString       m_bgImagePath;
+    std::shared_ptr<D3D11Texture> m_bgImageTex;
 
     std::unique_ptr<FrameRenderer> m_renderer;
 };

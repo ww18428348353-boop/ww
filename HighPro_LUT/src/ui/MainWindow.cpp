@@ -5,6 +5,7 @@
 #include "SchemePanel.h"
 #include "D3DWidget.h"
 #include "app/AppSettings.h"
+#include "app/AppTheme.h"
 #include "app/ProjectController.h"
 #include "render/DebugDumper.h"
 #include "render/LutBaker.h"
@@ -60,7 +61,13 @@ void MainWindow::buildCentral()
 
 void MainWindow::buildDocks()
 {
-    // 左侧: 资源树 (固定布局, 用户可拖动)
+    // 默认布局 (截图二风格):
+    //   左侧 LeftDockArea  : 资源树 + 方案画廊 横向并排 (split)
+    //   右侧 RightDockArea : 颜色效果 (竖向)
+    //   中央 central       : 画布预览
+    // 用户可自由拖动, 视图菜单也提供 "重置窗口布局 (默认)" 一键回到此布局.
+
+    // 资源树 (左)
     m_dockLayer = new QDockWidget(QStringLiteral("资源树"), this);
     m_dockLayer->setObjectName("DockLayerTree");
     m_layerTree = new LayerTreePanel(m_dockLayer);
@@ -68,33 +75,34 @@ void MainWindow::buildDocks()
     m_dockLayer->setMinimumWidth(180);
     addDockWidget(Qt::LeftDockWidgetArea, m_dockLayer);
 
-    // 底部: 颜色效果 (固定布局, 用户可拖动)
-    m_dockEffect = new QDockWidget(QStringLiteral("颜色效果"), this);
-    m_dockEffect->setObjectName("DockEffect");
-    auto* effPanel = new EffectPanel(m_dockEffect);
-    m_dockEffect->setWidget(effPanel);
-    m_dockEffect->setMinimumHeight(280);
-    addDockWidget(Qt::BottomDockWidgetArea, m_dockEffect);
-
-    // 方案画廊: 默认与"颜色效果" 横向并排 (在底部右半).
-    // 用户也可拖到 资源树 旁边并排, 或拖出成浮动窗口.
+    // 方案画廊: 与资源树横向并排在左侧
     m_dockScheme = new QDockWidget(QStringLiteral("方案画廊"), this);
     m_dockScheme->setObjectName("DockScheme");
     auto* schemePanel = new SchemePanel(m_dockScheme);
     m_dockScheme->setWidget(schemePanel);
     m_dockScheme->setMinimumWidth(220);
-    // 先 add 到底部区, 再 split: 这样 m_dockEffect 占左, m_dockScheme 占右
-    addDockWidget(Qt::BottomDockWidgetArea, m_dockScheme);
-    splitDockWidget(m_dockEffect, m_dockScheme, Qt::Horizontal);
+    addDockWidget(Qt::LeftDockWidgetArea, m_dockScheme);
+    splitDockWidget(m_dockLayer, m_dockScheme, Qt::Horizontal);
 
-    // 颜色效果 dock 初始宽度比之前少 100px (把空间让给方案画廊).
-    //   resizeDocks 在 show() 后才生效, 这里延迟到事件循环空闲触发.
+    // 颜色效果 (右)
+    m_dockEffect = new QDockWidget(QStringLiteral("颜色效果"), this);
+    m_dockEffect->setObjectName("DockEffect");
+    auto* effPanel = new EffectPanel(m_dockEffect);
+    m_dockEffect->setWidget(effPanel);
+    m_dockEffect->setMinimumWidth(280);
+    addDockWidget(Qt::RightDockWidgetArea, m_dockEffect);
+
+    // 初始尺寸分配: 默认给最小宽度, 用户可手动拉宽
+    //   resizeDocks 在 show() 后才生效, 延迟到事件循环空闲触发.
     QTimer::singleShot(0, this, [this]{
         const int w = this->width();
         if (w <= 0) return;
-        const int effW    = qMax(280, (w / 2) - 100);
-        const int schemeW = qMax(220, w - effW);
-        resizeDocks({m_dockEffect, m_dockScheme}, {effW, schemeW}, Qt::Horizontal);
+        const int layerW  = 180;   // 资源树最小宽度
+        const int schemeW = 220;   // 方案画廊最小宽度
+        const int effW    = 280;   // 颜色效果最小宽度
+        resizeDocks({m_dockLayer, m_dockScheme},
+                    {layerW, schemeW}, Qt::Horizontal);
+        resizeDocks({m_dockEffect}, {effW}, Qt::Horizontal);
     });
 
     // 资源树点击 → 切换当前编辑层
@@ -484,6 +492,89 @@ void MainWindow::buildMenus()
         });
     }
 
+    // 主题切换: 暗色 (默认) / 浅色, 持久化到 QSettings, 立刻生效
+    menuView->addSeparator();
+    {
+        auto* actDark = menuView->addAction(QStringLiteral("暗色主题"));
+        actDark->setCheckable(true);
+        actDark->setChecked(AppSettings::instance().themeDark());
+        connect(actDark, &QAction::toggled, this, [](bool dark){
+            AppSettings::instance().setThemeDark(dark);
+            AppTheme::apply(dark ? AppTheme::Mode::Dark : AppTheme::Mode::Light);
+        });
+    }
+
+    // 布局重置: 在小屏幕上 dock 拖拽容易卡死时, 一键回到默认排版
+    menuView->addSeparator();
+    {
+        auto* actResetLayout = menuView->addAction(QStringLiteral("重置窗口布局 (默认)"));
+        connect(actResetLayout, &QAction::triggered, this, [this]{
+            // 默认布局 = 资源树+画廊左 / 颜色效果右
+            for (auto* d : { m_dockLayer, m_dockEffect, m_dockScheme }) {
+                if (!d) continue;
+                d->setFloating(false);
+                d->setVisible(true);
+            }
+            removeDockWidget(m_dockLayer);
+            removeDockWidget(m_dockEffect);
+            removeDockWidget(m_dockScheme);
+
+            addDockWidget(Qt::LeftDockWidgetArea,  m_dockLayer);
+            addDockWidget(Qt::LeftDockWidgetArea,  m_dockScheme);
+            splitDockWidget(m_dockLayer, m_dockScheme, Qt::Horizontal);
+            addDockWidget(Qt::RightDockWidgetArea, m_dockEffect);
+
+            m_dockLayer->show();
+            m_dockScheme->show();
+            m_dockEffect->show();
+
+            QTimer::singleShot(0, this, [this]{
+                const int w = this->width();
+                if (w <= 0) return;
+                const int layerW  = qMax(180, w / 8);
+                const int schemeW = qMax(220, w / 4);
+                const int effW    = qMax(280, w / 4);
+                resizeDocks({m_dockLayer, m_dockScheme},
+                            {layerW, schemeW}, Qt::Horizontal);
+                resizeDocks({m_dockEffect}, {effW}, Qt::Horizontal);
+            });
+            statusBar()->showMessage(QStringLiteral("布局已重置为默认"), 4000);
+        });
+
+        // 备用布局: 颜色效果 + 方案画廊 横向并排在底部 (老布局).
+        auto* actBottomLayout = menuView->addAction(QStringLiteral("布局: 效果+画廊在底部"));
+        connect(actBottomLayout, &QAction::triggered, this, [this]{
+            for (auto* d : { m_dockLayer, m_dockEffect, m_dockScheme }) {
+                if (!d) continue;
+                d->setFloating(false);
+                d->setVisible(true);
+            }
+            removeDockWidget(m_dockLayer);
+            removeDockWidget(m_dockEffect);
+            removeDockWidget(m_dockScheme);
+
+            addDockWidget(Qt::LeftDockWidgetArea,   m_dockLayer);
+            addDockWidget(Qt::BottomDockWidgetArea, m_dockEffect);
+            addDockWidget(Qt::BottomDockWidgetArea, m_dockScheme);
+            splitDockWidget(m_dockEffect, m_dockScheme, Qt::Horizontal);
+
+            m_dockLayer->show();
+            m_dockEffect->show();
+            m_dockScheme->show();
+
+            QTimer::singleShot(0, this, [this]{
+                const int w = this->width();
+                if (w <= 0) return;
+                const int effW    = qMax(280, (w / 2) - 100);
+                const int schemeW = qMax(220, w - effW);
+                resizeDocks({m_dockEffect, m_dockScheme},
+                            {effW, schemeW}, Qt::Horizontal);
+            });
+            statusBar()->showMessage(
+                QStringLiteral("已切换到 [效果+画廊在底部] 布局"), 4000);
+        });
+    }
+
     // 调试 (M3 排查偏色用, M5 后会移到隐藏菜单)
     auto* menuDebug = menuBar()->addMenu(QStringLiteral("调试(&D)"));
     auto* actDumpFrame = menuDebug->addAction(QStringLiteral("抓当前帧 + reference 对比"));
@@ -543,7 +634,7 @@ void MainWindow::restoreGeometry()
     move(s.windowPos());
     if (s.windowMaximized()) showMaximized();
     // 当布局版本变更 (新增 dock / 改默认排列) 时, restoreState 用 versionId 区分
-    constexpr int kDockLayoutVersion = 2;   // M5 批 1 = 1; 画廊与颜色效果并排 = 2
+    constexpr int kDockLayoutVersion = 4;   // v3 -> v4: 默认改为 资源树+画廊左 / 效果右
     if (!s.dockState().isEmpty()) {
         // restoreState(state, version): version 不匹配返回 false, 沿用 buildDocks 的默认布局
         restoreState(s.dockState(), kDockLayoutVersion);
@@ -558,7 +649,7 @@ void MainWindow::persistGeometry()
         s.setWindowSize(size());
         s.setWindowPos(pos());
     }
-    constexpr int kDockLayoutVersion = 2;
+    constexpr int kDockLayoutVersion = 4;
     s.setDockState(saveState(kDockLayoutVersion));
 }
 
