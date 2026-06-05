@@ -259,6 +259,10 @@ void LayerTreePanel::syncCheckStates()
         if (layer) slot = proj.slotFor(*layer);
         const LayerColorSlot colorSlot = layer ? proj.colorSlotFor(*layer) : LayerColorSlot::Auto;
 
+        // emoji 显示策略: 只在 "用户手动指定" 时才显示 LayerSlot emoji,
+        // 启发式推断 (defaultSlotFor) 不再显示, 否则 "取消所有层级预设" 后仍会有 emoji.
+        const LayerSlot manualSlot = proj.layerSlots.value(k, LayerSlot::Unknown);
+
         QString newText = base;
         QFont font = node->font(0);
         font.setPointSize(m_tree->font().pointSize());
@@ -268,8 +272,8 @@ void LayerTreePanel::syncCheckStates()
             font.setBold(true);
         } else if (colorSlot != LayerColorSlot::Auto) {
             newText = layerColorSlotEmoji(colorSlot) + QStringLiteral(" ") + base;
-        } else if (slot != LayerSlot::Unknown) {
-            newText = layerSlotEmoji(slot) + QStringLiteral(" ") + base;
+        } else if (manualSlot != LayerSlot::Unknown) {
+            newText = layerSlotEmoji(manualSlot) + QStringLiteral(" ") + base;
         }
 
         if (node->text(0) != newText) node->setText(0, newText);
@@ -320,12 +324,37 @@ void LayerTreePanel::onItemSelected()
 void LayerTreePanel::onContextMenu(const QPoint& pos)
 {
     auto* it = m_tree->itemAt(pos);
-    if (!it) return;
-    const QString key = it->data(0, RoleLayerKey).toString();
-    if (key.isEmpty()) return;
 
     auto& ctl = ProjectController::instance();
     const auto& proj = ctl.project();
+
+    // === 空白区域 (无 item) → 全局批量菜单 ===
+    if (!it) {
+        if (proj.layers.isEmpty()) return;
+
+        QMenu menu(this);
+        QAction* aHideAll      = menu.addAction(QStringLiteral("关闭所有层级"));
+        QAction* aShowAll      = menu.addAction(QStringLiteral("显示所有层级"));
+        menu.addSeparator();
+        QAction* aClearAll     = menu.addAction(QStringLiteral("取消所有层级预设"));
+        QAction* aRandAll      = menu.addAction(QStringLiteral("随机所有层级预设"));
+        QAction* aRandSlot     = menu.addAction(QStringLiteral("随机所有层级部件预设"));
+        QAction* aRandColor    = menu.addAction(QStringLiteral("随机所有层级颜色预设"));
+
+        QAction* sel = menu.exec(m_tree->viewport()->mapToGlobal(pos));
+        if (!sel) return;
+        if (sel == aHideAll)         ctl.setAllLayersVisible(false);
+        else if (sel == aShowAll)    ctl.setAllLayersVisible(true);
+        else if (sel == aClearAll)   ctl.setAllLayerColorSlots(LayerColorSlot::Auto);
+        else if (sel == aRandAll)    ctl.randomizeAllLayerColorSlots();
+        else if (sel == aRandSlot)   ctl.randomizeAllLayerSlots();
+        else if (sel == aRandColor)  ctl.randomizeAllLayerColorSlots();
+        return;
+    }
+
+    const QString key = it->data(0, RoleLayerKey).toString();
+    if (key.isEmpty()) return;
+
     const bool skin = proj.skinSafeLayerKeys.contains(key);
     const int  curN = proj.skinSafeLayerKeys.size();
 

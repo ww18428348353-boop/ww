@@ -9,6 +9,7 @@
 #include <QSet>
 #include <QRandomGenerator>
 #include <QRegularExpression>
+#include <array>
 
 namespace HighPro {
 
@@ -257,6 +258,26 @@ void ProjectController::setLayerVisible(const QString& layerKey, bool visible)
         if (!m_project.hiddenLayerKeys.contains(layerKey)) {
             m_project.hiddenLayerKeys.insert(layerKey);
             changed = true;
+        }
+    }
+    if (changed) { m_dirty = true; emit visibilityChanged(); }
+}
+
+void ProjectController::setAllLayersVisible(bool visible)
+{
+    bool changed = false;
+    if (visible) {
+        if (!m_project.hiddenLayerKeys.isEmpty()) {
+            m_project.hiddenLayerKeys.clear();
+            changed = true;
+        }
+    } else {
+        for (const auto& l : m_project.layers) {
+            const QString k = l.key();
+            if (!m_project.hiddenLayerKeys.contains(k)) {
+                m_project.hiddenLayerKeys.insert(k);
+                changed = true;
+            }
         }
     }
     if (changed) { m_dirty = true; emit visibilityChanged(); }
@@ -1303,8 +1324,11 @@ void ProjectController::setAllLayerColorSlots(LayerColorSlot slot)
     bool changed = false;
 
     if (slot == LayerColorSlot::Auto) {
-        changed = !m_project.layerColorSlots.isEmpty();
-        m_project.layerColorSlots.clear();
+        // "全部自动" = 清空所有手动指定 (含 layerColorSlots / layerSlots / skinSafe).
+        // 这样空白处右键 "取消所有层级预设" 后, 列表上不会再有任何 emoji 残留.
+        if (!m_project.layerColorSlots.isEmpty()) { m_project.layerColorSlots.clear(); changed = true; }
+        if (!m_project.layerSlots.isEmpty())      { m_project.layerSlots.clear();      changed = true; }
+        if (!m_project.skinSafeLayerKeys.isEmpty()){ m_project.skinSafeLayerKeys.clear(); changed = true; }
     } else {
         if (!m_project.layerSlots.isEmpty()) {
             m_project.layerSlots.clear();
@@ -1320,6 +1344,72 @@ void ProjectController::setAllLayerColorSlots(LayerColorSlot slot)
                 m_project.layerColorSlots.insert(l.key(), slot);
                 changed = true;
             }
+        }
+    }
+
+    if (changed) {
+        m_dirty = true;
+        emit visibilityChanged();
+        emit effectsChanged();
+    }
+}
+
+void ProjectController::randomizeAllLayerColorSlots()
+{
+    if (m_project.layers.isEmpty()) return;
+
+    // 候选: Red..Gray (跳过 Auto), 共 12 个.
+    static const std::array<LayerColorSlot, 12> kCandidates = {
+        LayerColorSlot::Red,    LayerColorSlot::Orange, LayerColorSlot::Yellow,
+        LayerColorSlot::Green,  LayerColorSlot::Cyan,   LayerColorSlot::Blue,
+        LayerColorSlot::Purple, LayerColorSlot::Pink,   LayerColorSlot::Black,
+        LayerColorSlot::White,  LayerColorSlot::Silver, LayerColorSlot::Gray,
+    };
+
+    bool changed = false;
+    if (!m_project.layerSlots.isEmpty())          { m_project.layerSlots.clear();          changed = true; }
+    if (!m_project.skinSafeLayerKeys.isEmpty())   { m_project.skinSafeLayerKeys.clear();   changed = true; }
+
+    auto* rng = QRandomGenerator::global();
+    for (const auto& l : m_project.layers) {
+        const LayerColorSlot pick = kCandidates[rng->bounded((quint32)kCandidates.size())];
+        const LayerColorSlot old  = m_project.layerColorSlots.value(l.key(), LayerColorSlot::Auto);
+        if (old != pick) {
+            m_project.layerColorSlots.insert(l.key(), pick);
+            changed = true;
+        }
+    }
+
+    if (changed) {
+        m_dirty = true;
+        emit visibilityChanged();
+        emit effectsChanged();
+    }
+}
+
+void ProjectController::randomizeAllLayerSlots()
+{
+    if (m_project.layers.isEmpty()) return;
+
+    // 候选: Hair..WeaponNonMetal (跳过 Unknown / Skin), 共 7 个.
+    // 跳过 Skin: 避免随机把普通层误标为肤色保护, 让该层不再可变色.
+    static const std::array<LayerSlot, 7> kCandidates = {
+        LayerSlot::Hair,        LayerSlot::Clothing,    LayerSlot::Skirt,
+        LayerSlot::Decor01,     LayerSlot::Decor02,
+        LayerSlot::WeaponMetal, LayerSlot::WeaponNonMetal,
+    };
+
+    bool changed = false;
+    if (!m_project.layerColorSlots.isEmpty())   { m_project.layerColorSlots.clear();   changed = true; }
+    if (!m_project.skinSafeLayerKeys.isEmpty()) { m_project.skinSafeLayerKeys.clear(); changed = true; }
+
+    auto* rng = QRandomGenerator::global();
+    for (const auto& l : m_project.layers) {
+        const LayerSlot pick = kCandidates[rng->bounded((quint32)kCandidates.size())];
+        const LayerSlot old  = m_project.layerSlots.value(l.key(), LayerSlot::Unknown);
+        if (old != pick) {
+            m_project.layerSlots.insert(l.key(), pick);
+            changed = true;
         }
     }
 

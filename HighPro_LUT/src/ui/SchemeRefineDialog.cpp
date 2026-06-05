@@ -24,6 +24,7 @@
 #include <QSet>
 #include <QShortcut>
 #include <QKeySequence>
+#include <algorithm>
 
 namespace HighPro {
 
@@ -178,14 +179,16 @@ void SchemeRefineDialog::buildUi()
     mid->setSpacing(8);
 
     m_list = new QListWidget(this);
+    // 宽度回到 190; 行高目标 ~35px (字号略大于原始, padding 收紧)
     m_list->setFixedWidth(190);
     // 不省略文本, 避免 Qt 在选中/悬停时弹出省略文本浮层遮挡相邻行
     m_list->setTextElideMode(Qt::ElideNone);
     m_list->setUniformItemSizes(true);
     m_list->setStyleSheet(
-        "QListWidget{background:#262626;color:#ddd;border:1px solid #3a3a3a;outline:0;}"
-        // 行高拉大, 上下间距更宽松
-        "QListWidget::item{padding:9px 10px;border:0;}"
+        "QListWidget{background:#262626;color:#ddd;border:1px solid #3a3a3a;outline:0;"
+        "font-size:15px;}"
+        // 行高 ≈ 35px (font 15 + padding 7*2 + 边距)
+        "QListWidget::item{padding:7px 10px;border:0;min-height:21px;}"
         "QListWidget::item:hover{background:#2f2f2f;}"
         // 选中: 加粗 + 黄色文字 (要求: 选中层文字变粗 + 黄色字体颜色)
         "QListWidget::item:selected{background:#3b6ea8;color:#ffd540;font-weight:bold;}"
@@ -236,7 +239,30 @@ void SchemeRefineDialog::populateLayerList()
     }
 
     const auto& proj = ProjectController::instance().project();
+
+    // 层级顺序对齐资源树: addon → numbered (高→低) → body.
+    // (proj.layers 自身顺序为 body → numbered (低→高) → addon, 是反的.)
+    QVector<const LayerData*> addonList;
+    QVector<const LayerData*> numberedList;
+    const LayerData* bodyLayer = nullptr;
     for (const auto& l : proj.layers) {
+        if      (l.kind == LayerKind::Addon)    addonList.push_back(&l);
+        else if (l.kind == LayerKind::Numbered) numberedList.push_back(&l);
+        else if (l.kind == LayerKind::Body)     bodyLayer = &l;
+    }
+    std::sort(numberedList.begin(), numberedList.end(),
+              [](const LayerData* a, const LayerData* b){
+                  return a->numberedIdx > b->numberedIdx;
+              });
+
+    QVector<const LayerData*> ordered;
+    ordered.reserve(addonList.size() + numberedList.size() + (bodyLayer ? 1 : 0));
+    for (const auto* l : addonList)    ordered.push_back(l);
+    for (const auto* l : numberedList) ordered.push_back(l);
+    if (bodyLayer) ordered.push_back(bodyLayer);
+
+    for (const auto* lp : ordered) {
+        const auto& l = *lp;
         const QString k = l.key();
         auto* item = new QListWidgetItem(layerDisplay(l));
         item->setData(Qt::UserRole, k);
@@ -377,10 +403,17 @@ QWidget* SchemeRefineDialog::buildEffectPanel(const QString& layerKey)
         auto* editor = new CurveEditor(body);
         editor->setCurves(es.curves);
         editor->setMinimumHeight(220);
+        // 恢复"上次查看"的曲线通道 (Ctrl+Z/Ctrl+Y 还原 UI 上下文用)
+        const int initCh = m_layerCurveCh.value(layerKey, 0);
+        combo->setCurrentIndex(initCh);
+        editor->setChannel(initCh);
         l->addWidget(editor, 1);
 
         connect(combo, qOverload<int>(&QComboBox::currentIndexChanged),
-                editor, &CurveEditor::setChannel);
+                this, [this, layerKey, editor](int ch){
+                    m_layerCurveCh[layerKey] = ch;
+                    editor->setChannel(ch);
+                });
 
         // 曲线变化 → 写 working + 调度预览刷新 (高频, 走 debounce)
         connect(editor, &CurveEditor::curvesChanged, this, [this, layerKey, editor]{
@@ -503,6 +536,9 @@ void SchemeRefineDialog::scheduleApplyToProject(const QString& layerKey)
                 m_sessionStartSnapshot.insert(it.key(), it.value());
             }
         }
+        // UI 上下文: Ctrl+Z 时把"被撤销操作发生时所处的层 + 各层曲线通道"也还原
+        m_sessionStartLayerKey = m_list ? m_layerKeys.value(m_list->currentRow()) : QString();
+        m_sessionStartCurveCh  = m_layerCurveCh;
         m_sessionActive = true;
     }
 
@@ -580,12 +616,18 @@ void SchemeRefineDialog::commitDragSession()
             }
         }
         if (changed) {
-            m_localUndo.push_back(std::move(m_sessionStartSnapshot));
+            LocalUndoStep step;
+            step.effects        = std::move(m_sessionStartSnapshot);
+            step.activeLayerKey = m_sessionStartLayerKey;
+            step.curveChannel   = m_sessionStartCurveCh;
+            m_localUndo.push_back(std::move(step));
             while (m_localUndo.size() > kLocalUndoLimit) m_localUndo.removeFirst();
             m_localRedo.clear();
         }
     }
     m_sessionStartSnapshot.clear();
+    m_sessionStartLayerKey.clear();
+    m_sessionStartCurveCh.clear();
     m_sessionActive = false;
 }
 
@@ -622,22 +664,35 @@ void SchemeRefineDialog::localUndo()
     // pending 先提交一次 (会顺带合并到栈 → 用户拖到一半 Ctrl+Z 时, 拖到的中间值不会丢)
     commitDragSession();
 
-    // 当前 → redo 栈
-    QHash<QString, EffectStack> cur;
+    // 当前 → redo 栈 (含当前 UI 上下文)
+    LocalUndoStep cur;
     for (auto it = sc.layerEffects.constBegin(); it != sc.layerEffects.constEnd(); ++it) {
-        cur.insert(it.key(), it.value());
+        cur.effects.insert(it.key(), it.value());
     }
+    cur.activeLayerKey = m_list ? m_layerKeys.value(m_list->currentRow()) : QString();
+    cur.curveChannel   = m_layerCurveCh;
     m_localRedo.push_back(std::move(cur));
     while (m_localRedo.size() > kLocalUndoLimit) m_localRedo.removeFirst();
 
-    // 上一帧 ← undo 栈, 写回 working + project
-    QHash<QString, EffectStack> prev = m_localUndo.takeLast();
-    for (auto it = prev.constBegin(); it != prev.constEnd(); ++it) {
+    // 上一帧 ← undo 栈, 写回 working + project + UI 上下文
+    LocalUndoStep prev = m_localUndo.takeLast();
+    for (auto it = prev.effects.constBegin(); it != prev.effects.constEnd(); ++it) {
         m_workingEffects[it.key()] = it.value();
-        sc.layerEffects[it.key()] = it.value();
+        sc.layerEffects[it.key()]  = it.value();
+    }
+    m_layerCurveCh = prev.curveChannel;
+
+    // 切回到被撤销操作所处的层
+    if (m_list && !prev.activeLayerKey.isEmpty()) {
+        const int row = m_layerKeys.indexOf(prev.activeLayerKey);
+        if (row >= 0 && row != m_list->currentRow()) {
+            QSignalBlocker bl(m_list);
+            m_list->setCurrentRow(row);
+            m_stack->setCurrentIndex(row);
+        }
     }
     ctl.emitPreviewRefresh();
-    rebuildCurrentLayerPanel();
+    rebuildCurrentLayerPanel();   // panel 内会读 m_layerCurveCh 恢复 combo + CurveEditor 通道
 }
 
 void SchemeRefineDialog::localRedo()
@@ -651,17 +706,29 @@ void SchemeRefineDialog::localRedo()
 
     commitDragSession();
 
-    QHash<QString, EffectStack> cur;
+    LocalUndoStep cur;
     for (auto it = sc.layerEffects.constBegin(); it != sc.layerEffects.constEnd(); ++it) {
-        cur.insert(it.key(), it.value());
+        cur.effects.insert(it.key(), it.value());
     }
+    cur.activeLayerKey = m_list ? m_layerKeys.value(m_list->currentRow()) : QString();
+    cur.curveChannel   = m_layerCurveCh;
     m_localUndo.push_back(std::move(cur));
     while (m_localUndo.size() > kLocalUndoLimit) m_localUndo.removeFirst();
 
-    QHash<QString, EffectStack> next = m_localRedo.takeLast();
-    for (auto it = next.constBegin(); it != next.constEnd(); ++it) {
+    LocalUndoStep next = m_localRedo.takeLast();
+    for (auto it = next.effects.constBegin(); it != next.effects.constEnd(); ++it) {
         m_workingEffects[it.key()] = it.value();
-        sc.layerEffects[it.key()] = it.value();
+        sc.layerEffects[it.key()]  = it.value();
+    }
+    m_layerCurveCh = next.curveChannel;
+
+    if (m_list && !next.activeLayerKey.isEmpty()) {
+        const int row = m_layerKeys.indexOf(next.activeLayerKey);
+        if (row >= 0 && row != m_list->currentRow()) {
+            QSignalBlocker bl(m_list);
+            m_list->setCurrentRow(row);
+            m_stack->setCurrentIndex(row);
+        }
     }
     ctl.emitPreviewRefresh();
     rebuildCurrentLayerPanel();

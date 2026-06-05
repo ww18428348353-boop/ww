@@ -3,6 +3,8 @@
 #include "ColorEffect.h"
 #include <array>
 #include <cstdint>
+#include <vector>
+#include <utility>
 
 namespace HighPro {
 
@@ -18,6 +20,21 @@ class CurveSolver
 {
 public:
     static constexpr int kSize = 256;
+
+    // 预编译后的曲线 (sorted 控制点 + 单调修正切线), 供高密浮点采样复用.
+    // UI 侧应一次 prepare, 循环 evaluate, 避免每像素都排序/求切线.
+    struct Spline
+    {
+        std::vector<std::pair<double, double>> pts;  // x ∈ [0,255], 已含端点夹紧
+        std::vector<double> m;                       // 长度 == pts.size()
+    };
+
+    // 把控制点编译成 Spline (排序 + 端点夹紧 + Fritsch-Carlson 切线).
+    static Spline prepare(const CurveParams::Pts& pts);
+
+    // 在已编译的 Spline 上做浮点求值: x ∈ [0,255], 返回 [0,255] (不夹紧到 uint8).
+    // 用于 UI 高密绘制, 不带 8-bit 量化.
+    static double evaluate(const Spline& s, double x);
 
     // 输出 size = 256*4 字节
     static void buildLut(const CurveParams& p, std::array<uint8_t, kSize * 4>& out);

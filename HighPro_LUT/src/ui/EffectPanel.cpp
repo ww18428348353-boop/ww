@@ -49,7 +49,7 @@ public:
         m_spin = new QSpinBox(this);
         m_spin->setRange(minv, maxv);
         m_spin->setValue(defv);
-        m_spin->setFixedWidth(64);
+        m_spin->setFixedWidth(70);
         lay->addWidget(m_spin);
 
         connect(m_slider, &QSlider::valueChanged, this, [this](int v){

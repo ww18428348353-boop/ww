@@ -104,6 +104,17 @@ public:
     void setLayerColorSlot(const QString& layerKey, LayerColorSlot slot);
     void setAllLayerColorSlots(LayerColorSlot slot);
 
+    // 资源树空白处右键: 批量显隐 / 批量清空预设 / 批量随机预设.
+    //   setAllLayersVisible(true/false): 一次性显示/隐藏所有层 (含 addon 子层).
+    //   randomizeAllLayerColorSlots():   每层独立随机一个非 Auto 的 LayerColorSlot,
+    //                                    同时清空 layerSlots / skinSafeLayerKeys.
+    //   randomizeAllLayerSlots():        每层独立随机一个非 Unknown/非 Skin 的 LayerSlot
+    //                                    (跳过 Skin 避免误标肤色保护),
+    //                                    同时清空 layerColorSlots / skinSafeLayerKeys.
+    void setAllLayersVisible(bool visible);
+    void randomizeAllLayerColorSlots();
+    void randomizeAllLayerSlots();
+
     // M5: 方案管理
     int  schemeCount() const { return m_project.schemes.size(); }
     int  currentSchemeIndex() const { return m_project.currentSchemeIndex; }

@@ -158,18 +158,27 @@ void CurveEditor::paintEvent(QPaintEvent*)
     p.setPen(QPen(QColor(70, 70, 70, 180), 1, Qt::DashLine));
     p.drawLine(dataToScreen(0, 0), dataToScreen(255, 255));
 
-    // 画一条曲线 (lut 256 点)
+    // 画一条曲线 — 浮点 evaluate + 高密采样 (Step 1+2)
+    // 不再走 8-bit LUT, 避免 1/255 量化阶梯; 采样密度按控件像素宽度的 3x, 至少 512.
     auto drawOne = [&](const CurveParams::Pts& pts, QColor color, qreal width) {
-        std::array<uint8_t, 256> lut{};
-        CurveSolver::buildSingleLut(pts, lut);
+        const auto spline = CurveSolver::prepare(pts);
         QPen pen(color, width);
         pen.setCapStyle(Qt::RoundCap);
         pen.setJoinStyle(Qt::RoundJoin);
         p.setPen(pen);
+
+        const int samples = std::max(W * 3, 512);
+        const double Wd = (double)W;
+        const double Hd = (double)H;
         QPainterPath path;
-        for (int x = 0; x < 256; ++x) {
-            QPoint sp = dataToScreen(x, lut[x]);
-            if (x == 0) path.moveTo(sp);
+        for (int i = 0; i <= samples; ++i) {
+            const double t    = (double)i / samples;        // 0..1
+            const double x255 = t * 255.0;
+            const double y255 = CurveSolver::evaluate(spline, x255);
+            const double sx = kPad + t * Wd;
+            const double sy = kPad + Hd - (y255 / 255.0) * Hd;
+            const QPointF sp(sx, sy);
+            if (i == 0) path.moveTo(sp);
             else        path.lineTo(sp);
         }
         p.drawPath(path);
@@ -271,7 +280,9 @@ void CurveEditor::mousePressEvent(QMouseEvent* e)
             }
             update();
             emit curvesChanged();
-            emit editingFinished();
+            // 注意: 这里不 emit editingFinished — 加点后 m_dragIdx 已就位,
+            // 用户后续可能立即拖动新点; 由 mouseReleaseEvent 统一发一次 editingFinished,
+            // 保证"加点+拖动"是一个 undo 步, 而不是两步.
         } else {
             m_dragIdx = idx;
         }

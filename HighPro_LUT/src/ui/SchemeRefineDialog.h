@@ -74,13 +74,25 @@ private:
     //                          把起点快照入 undo 栈, 清空 session.
     bool                                  m_sessionActive = false;
     QHash<QString, EffectStack>           m_sessionStartSnapshot;
+    QString                               m_sessionStartLayerKey;     // 会话起点选中的层
+    QHash<QString, int>                   m_sessionStartCurveCh;      // 会话起点各层曲线通道
 
-    // 弹窗内 Undo / Redo 栈 — 每个 undo 步是一次"拖动会话"前的全层 EffectStack 快照.
-    //   Ctrl+Z 回到上一个 flush 之前的滑块状态; Ctrl+Y 重做.
+    // 弹窗内 Undo / Redo 栈 — 每个 undo 步是一次"拖动会话"前的全层快照 + UI 上下文.
+    //   Ctrl+Z 不仅还原数据, 还还原"被撤销操作发生时所处的层与曲线通道",
+    //   避免在 R/G/B 通道改了曲线后 Ctrl+Z 跳回 RGB 主通道的视觉错位.
     //   栈深度 100. 与 ProjectController 全局 undo 解耦 (它针对方案级别批量操作).
-    QVector<QHash<QString, EffectStack>> m_localUndo;
-    QVector<QHash<QString, EffectStack>> m_localRedo;
+    struct LocalUndoStep {
+        QHash<QString, EffectStack> effects;          // 全层 EffectStack
+        QString                     activeLayerKey;   // 该步发生时选中的层
+        QHash<QString, int>         curveChannel;     // 各层"上次查看"的曲线通道 0..3
+    };
+    QVector<LocalUndoStep> m_localUndo;
+    QVector<LocalUndoStep> m_localRedo;
     static constexpr int kLocalUndoLimit = 100;
+
+    // 各层"当前查看"的曲线通道 (0=RGB, 1=R, 2=G, 3=B). 跨层切换记忆,
+    // 也用于 buildEffectPanel 重建后恢复 combo + CurveEditor 通道.
+    QHash<QString, int> m_layerCurveCh;
 
     void localUndo();
     void localRedo();
