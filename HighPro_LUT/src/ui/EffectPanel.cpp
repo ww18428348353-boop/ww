@@ -448,7 +448,7 @@ void EffectPanel::rebuildForCurrentLayer()
         auto* row = new QHBoxLayout();
         row->setSpacing(6);
         auto* chBox = new QComboBox(body);
-        chBox->addItem(QStringLiteral("Master"));
+        chBox->addItem(QStringLiteral("RGB"));
         chBox->addItem(QStringLiteral("R"));
         chBox->addItem(QStringLiteral("G"));
         chBox->addItem(QStringLiteral("B"));

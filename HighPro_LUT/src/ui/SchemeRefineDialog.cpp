@@ -2,9 +2,11 @@
 #include "app/ProjectController.h"
 #include "core/Project.h"
 #include "core/LayerData.h"
+#include "ui/widgets/CurveEditor.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QGridLayout>
 #include <QListWidget>
 #include <QListWidgetItem>
 #include <QStackedWidget>
@@ -13,6 +15,8 @@
 #include <QGroupBox>
 #include <QSlider>
 #include <QSpinBox>
+#include <QCheckBox>
+#include <QComboBox>
 #include <QMessageBox>
 #include <QSignalBlocker>
 #include <QFrame>
@@ -108,7 +112,7 @@ SchemeRefineDialog::SchemeRefineDialog(int schemeIdx, QWidget* parent)
     : QDialog(parent), m_schemeIdx(schemeIdx)
 {
     setWindowTitle(QStringLiteral("❤️细化方案"));
-    resize(720, 520);
+    resize(615, 1055);
     setModal(true);             // 模态; exec() 期间画布仍接收 effectsChanged 实时刷新
 
     const auto& proj = ProjectController::instance().project();
@@ -174,11 +178,18 @@ void SchemeRefineDialog::buildUi()
     mid->setSpacing(8);
 
     m_list = new QListWidget(this);
-    m_list->setFixedWidth(180);
+    m_list->setFixedWidth(190);
+    // 不省略文本, 避免 Qt 在选中/悬停时弹出省略文本浮层遮挡相邻行
+    m_list->setTextElideMode(Qt::ElideNone);
+    m_list->setUniformItemSizes(true);
     m_list->setStyleSheet(
-        "QListWidget{background:#262626;color:#ddd;border:1px solid #3a3a3a;}"
-        "QListWidget::item{padding:6px 8px;}"
-        "QListWidget::item:selected{background:#3b6ea8;color:#fff;}"
+        "QListWidget{background:#262626;color:#ddd;border:1px solid #3a3a3a;outline:0;}"
+        // 行高拉大, 上下间距更宽松
+        "QListWidget::item{padding:9px 10px;border:0;}"
+        "QListWidget::item:hover{background:#2f2f2f;}"
+        // 选中: 加粗 + 黄色文字 (要求: 选中层文字变粗 + 黄色字体颜色)
+        "QListWidget::item:selected{background:#3b6ea8;color:#ffd540;font-weight:bold;}"
+        "QListWidget::item:selected:!active{background:#3b6ea8;color:#ffd540;font-weight:bold;}"
     );
     connect(m_list, &QListWidget::currentRowChanged, this, &SchemeRefineDialog::onLayerChanged);
     mid->addWidget(m_list, 0);
@@ -335,11 +346,135 @@ QWidget* SchemeRefineDialog::buildEffectPanel(const QString& layerKey)
         lay->addWidget(box);
     }
 
+    // 3. 曲线
+    {
+        auto* box = new QGroupBox(QStringLiteral("3. 曲线"), content);
+        box->setCheckable(true);
+        box->setChecked(es.enabled[EffectStack::ECurves]);
+
+        auto* body = new QWidget(box);
+        auto* l = new QVBoxLayout(body);
+        l->setContentsMargins(0, 0, 0, 0); l->setSpacing(4);
+
+        auto* topRow = new QHBoxLayout();
+        topRow->setSpacing(6);
+        auto* combo = new QComboBox(body);
+        combo->addItem(QStringLiteral("RGB"));
+        combo->addItem(QStringLiteral("R"));
+        combo->addItem(QStringLiteral("G"));
+        combo->addItem(QStringLiteral("B"));
+        combo->setFixedWidth(80);
+        topRow->addWidget(new QLabel(QStringLiteral("通道:"), body));
+        topRow->addWidget(combo);
+
+        auto* btnResetCh  = new QPushButton(QStringLiteral("重置当前"), body);
+        auto* btnResetAll = new QPushButton(QStringLiteral("重置全部"), body);
+        topRow->addWidget(btnResetCh);
+        topRow->addWidget(btnResetAll);
+        topRow->addStretch(1);
+        l->addLayout(topRow);
+
+        auto* editor = new CurveEditor(body);
+        editor->setCurves(es.curves);
+        editor->setMinimumHeight(220);
+        l->addWidget(editor, 1);
+
+        connect(combo, qOverload<int>(&QComboBox::currentIndexChanged),
+                editor, &CurveEditor::setChannel);
+
+        // 曲线变化 → 写 working + 调度预览刷新 (高频, 走 debounce)
+        connect(editor, &CurveEditor::curvesChanged, this, [this, layerKey, editor]{
+            auto& s = workingFor(layerKey);
+            s.curves = editor->curves();
+            s.enabled[EffectStack::ECurves] = true;
+            scheduleApplyToProject(layerKey);
+        });
+        // 鼠标释放 / 重置 / 加点 / 删点 → 提交一个 undo 步
+        connect(editor, &CurveEditor::editingFinished, this, [this]{
+            commitDragSession();
+        });
+
+        connect(btnResetCh,  &QPushButton::clicked, editor, &CurveEditor::resetCurrent);
+        connect(btnResetAll, &QPushButton::clicked, editor, &CurveEditor::resetAll);
+
+        auto* boxLay = new QVBoxLayout(box);
+        boxLay->setContentsMargins(8, 8, 8, 8);
+        boxLay->addWidget(body);
+        body->setEnabled(box->isChecked());
+        connect(box, &QGroupBox::toggled, this, [this, layerKey, body](bool on){
+            auto& s = workingFor(layerKey);
+            s.enabled[EffectStack::ECurves] = on;
+            body->setEnabled(on);
+            scheduleApplyToProject(layerKey);
+            commitDragSession();
+        });
+        lay->addWidget(box);
+    }
+
+    // 4. 通道混合器
+    {
+        auto* box = new QGroupBox(QStringLiteral("4. 通道混合器"), content);
+        box->setCheckable(true);
+        box->setChecked(es.enabled[EffectStack::EChMix]);
+
+        auto* body = new QWidget(box);
+        auto* l = new QVBoxLayout(body);
+        l->setContentsMargins(0, 0, 0, 0); l->setSpacing(2);
+        auto commit = [this]{ commitDragSession(); };
+
+        auto addCh = [&](const QString& label, std::function<int*(EffectStack&)> field) {
+            EffectStack& s0 = workingFor(layerKey);
+            l->addWidget(new SliderRow(label, -200, 200, *field(s0),
+                [this, layerKey, field](int v){
+                    auto& s = workingFor(layerKey);
+                    *field(s) = v;
+                    s.enabled[EffectStack::EChMix] = true;
+                    scheduleApplyToProject(layerKey);
+                }, commit));
+        };
+
+        // 主对角线 (默认 100)
+        addCh(QStringLiteral("红 → 红"), [](EffectStack& s)->int*{ return &s.chMix.rr; });
+        addCh(QStringLiteral("绿 → 绿"), [](EffectStack& s)->int*{ return &s.chMix.gg; });
+        addCh(QStringLiteral("蓝 → 蓝"), [](EffectStack& s)->int*{ return &s.chMix.bb; });
+        // 副对角 (默认 0)
+        addCh(QStringLiteral("红 → 绿"), [](EffectStack& s)->int*{ return &s.chMix.rg; });
+        addCh(QStringLiteral("红 → 蓝"), [](EffectStack& s)->int*{ return &s.chMix.rb; });
+        addCh(QStringLiteral("绿 → 红"), [](EffectStack& s)->int*{ return &s.chMix.gr; });
+        addCh(QStringLiteral("绿 → 蓝"), [](EffectStack& s)->int*{ return &s.chMix.gb; });
+        addCh(QStringLiteral("蓝 → 红"), [](EffectStack& s)->int*{ return &s.chMix.br; });
+        addCh(QStringLiteral("蓝 → 绿"), [](EffectStack& s)->int*{ return &s.chMix.bg; });
+
+        auto* mono = new QCheckBox(QStringLiteral("单色"), body);
+        mono->setChecked(es.chMix.monochrome);
+        connect(mono, &QCheckBox::toggled, this, [this, layerKey](bool on){
+            auto& s = workingFor(layerKey);
+            s.chMix.monochrome = on;
+            s.enabled[EffectStack::EChMix] = true;
+            scheduleApplyToProject(layerKey);
+            commitDragSession();
+        });
+        l->addWidget(mono);
+
+        auto* boxLay = new QVBoxLayout(box);
+        boxLay->setContentsMargins(8, 8, 8, 8);
+        boxLay->addWidget(body);
+        body->setEnabled(box->isChecked());
+        connect(box, &QGroupBox::toggled, this, [this, layerKey, body](bool on){
+            auto& s = workingFor(layerKey);
+            s.enabled[EffectStack::EChMix] = on;
+            body->setEnabled(on);
+            scheduleApplyToProject(layerKey);
+            commitDragSession();
+        });
+        lay->addWidget(box);
+    }
+
     // 提示
     {
         auto* hint = new QLabel(content);
-        hint->setText(QStringLiteral("说明: 此处只调整 色相/饱和度 与 亮度/对比度.\n"
-                                     "其他效果 (曲线 / 通道混合 / 颜色平衡 / 照片滤镜 / 自然饱和度) 保留原值, 保存时不会丢失."));
+        hint->setText(QStringLiteral("说明: 此处可调整 色相/饱和度、亮度/对比度、曲线、通道混合器.\n"
+                                     "其他效果 (颜色平衡 / 照片滤镜 / 自然饱和度) 保留原值, 保存时不会丢失."));
         hint->setStyleSheet("color:#888;padding:6px 2px;");
         hint->setWordWrap(true);
         lay->addWidget(hint);
@@ -424,8 +559,23 @@ void SchemeRefineDialog::commitDragSession()
              || a.hsl.lightness != b.hsl.lightness
              || a.brtCtr.brightness != b.brtCtr.brightness
              || a.brtCtr.contrast != b.brtCtr.contrast
-             || a.enabled[EffectStack::EHsl] != b.enabled[EffectStack::EHsl]
-             || a.enabled[EffectStack::EBrtCtr] != b.enabled[EffectStack::EBrtCtr]) {
+             || a.enabled[EffectStack::EHsl]    != b.enabled[EffectStack::EHsl]
+             || a.enabled[EffectStack::EBrtCtr] != b.enabled[EffectStack::EBrtCtr]
+             || a.enabled[EffectStack::ECurves] != b.enabled[EffectStack::ECurves]
+             || a.enabled[EffectStack::EChMix]  != b.enabled[EffectStack::EChMix]
+             // ChMix 12 个权重 + monochrome
+             || a.chMix.rr != b.chMix.rr || a.chMix.rg != b.chMix.rg || a.chMix.rb != b.chMix.rb
+             || a.chMix.gr != b.chMix.gr || a.chMix.gg != b.chMix.gg || a.chMix.gb != b.chMix.gb
+             || a.chMix.br != b.chMix.br || a.chMix.bg != b.chMix.bg || a.chMix.bb != b.chMix.bb
+             || a.chMix.r_const != b.chMix.r_const
+             || a.chMix.g_const != b.chMix.g_const
+             || a.chMix.b_const != b.chMix.b_const
+             || a.chMix.monochrome != b.chMix.monochrome
+             // Curves 4 通道控制点
+             || a.curves.master != b.curves.master
+             || a.curves.r != b.curves.r
+             || a.curves.g != b.curves.g
+             || a.curves.b != b.curves.b) {
                 changed = true;
             }
         }
@@ -529,8 +679,12 @@ void SchemeRefineDialog::onResetCurrentLayer()
     auto& cur = m_workingEffects[k];
     cur.hsl    = snap.hsl;
     cur.brtCtr = snap.brtCtr;
+    cur.curves = snap.curves;
+    cur.chMix  = snap.chMix;
     cur.enabled[EffectStack::EHsl]    = snap.enabled[EffectStack::EHsl];
     cur.enabled[EffectStack::EBrtCtr] = snap.enabled[EffectStack::EBrtCtr];
+    cur.enabled[EffectStack::ECurves] = snap.enabled[EffectStack::ECurves];
+    cur.enabled[EffectStack::EChMix]  = snap.enabled[EffectStack::EChMix];
 
     // 重建当前层 panel 反映回退后的值
     auto* old = m_stack->widget(row);

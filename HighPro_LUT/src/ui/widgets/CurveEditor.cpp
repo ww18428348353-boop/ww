@@ -4,22 +4,28 @@
 #include <QPainter>
 #include <QMouseEvent>
 #include <QPainterPath>
+#include <QFontMetrics>
 #include <algorithm>
 
 namespace HighPro {
 
 namespace {
-constexpr int kPad = 6;
-constexpr int kHandleR = 4;        // 控制点半径 (像素)
-constexpr int kPickR = 8;          // 命中半径
+constexpr int kPad     = 8;
+constexpr int kHandleR = 5;        // 控制点半径 (像素) — 比 4 稍大, 拖拽手感更稳
+constexpr int kPickR   = 10;       // 命中半径
 
 QColor channelColor(int ch)
 {
+    // 通道颜色 (按用户要求):
+    //   RGB(master) = #b9b9b9 浅灰
+    //   R           = #a41010 深红
+    //   G           = #0fa80f 翠绿
+    //   B           = #14148c 深蓝
     switch (ch) {
-    case 1: return QColor(220, 80, 80);
-    case 2: return QColor(80, 220, 80);
-    case 3: return QColor(80, 140, 240);
-    default: return QColor(220, 220, 220);
+    case 1: return QColor(0xa4, 0x10, 0x10);
+    case 2: return QColor(0x0f, 0xa8, 0x0f);
+    case 3: return QColor(0x14, 0x14, 0x8c);
+    default: return QColor(0xb9, 0xb9, 0xb9);
     }
 }
 } // namespace
@@ -50,6 +56,7 @@ void CurveEditor::resetCurrent()
     p = { {0,0}, {255,255} };
     update();
     emit curvesChanged();
+    emit editingFinished();
 }
 
 void CurveEditor::resetAll()
@@ -57,6 +64,7 @@ void CurveEditor::resetAll()
     m_curves.reset();
     update();
     emit curvesChanged();
+    emit editingFinished();
 }
 
 CurveParams::Pts& CurveEditor::curPts()
@@ -119,7 +127,9 @@ void CurveEditor::sortPts()
 void CurveEditor::paintEvent(QPaintEvent*)
 {
     QPainter p(this);
-    p.setRenderHint(QPainter::Antialiasing);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setRenderHint(QPainter::TextAntialiasing, true);
+    p.setRenderHint(QPainter::SmoothPixmapTransform, true);
 
     // 背景
     p.fillRect(rect(), QColor(40, 40, 40));
@@ -128,25 +138,33 @@ void CurveEditor::paintEvent(QPaintEvent*)
     const int H = height() - 2 * kPad;
     if (W <= 0 || H <= 0) return;
 
-    // 网格 (8 段)
+    // 边框 (内嵌一像素, AA 时不糊)
+    p.setPen(QPen(QColor(60, 60, 60), 1));
+    p.setBrush(Qt::NoBrush);
+    p.drawRect(QRectF(kPad + 0.5, kPad + 0.5, W - 1, H - 1));
+
+    // 网格 (8 段) — 中线略深, 其他更细更暗
     for (int i = 0; i <= 8; ++i) {
         int x = kPad + W * i / 8;
         int y = kPad + H * i / 8;
-        if (i == 4) p.setPen(QPen(QColor(100, 100, 100), 1));
-        else        p.setPen(QPen(QColor(70, 70, 70), 1));
+        if (i == 4)        p.setPen(QPen(QColor(95, 95, 95), 1));
+        else if (i == 0 || i == 8) p.setPen(QPen(QColor(60, 60, 60), 1));
+        else               p.setPen(QPen(QColor(64, 64, 64), 1));
         p.drawLine(x, kPad, x, kPad + H);
         p.drawLine(kPad, y, kPad + W, y);
     }
 
     // 对角参考线
-    p.setPen(QPen(QColor(60, 60, 60, 180), 1, Qt::DashLine));
+    p.setPen(QPen(QColor(70, 70, 70, 180), 1, Qt::DashLine));
     p.drawLine(dataToScreen(0, 0), dataToScreen(255, 255));
 
     // 画一条曲线 (lut 256 点)
-    auto drawOne = [&](const CurveParams::Pts& pts, QColor color, int width) {
+    auto drawOne = [&](const CurveParams::Pts& pts, QColor color, qreal width) {
         std::array<uint8_t, 256> lut{};
         CurveSolver::buildSingleLut(pts, lut);
         QPen pen(color, width);
+        pen.setCapStyle(Qt::RoundCap);
+        pen.setJoinStyle(Qt::RoundJoin);
         p.setPen(pen);
         QPainterPath path;
         for (int x = 0; x < 256; ++x) {
@@ -157,26 +175,78 @@ void CurveEditor::paintEvent(QPaintEvent*)
         p.drawPath(path);
     };
 
-    // 1) 先画"非当前"通道, 半透明 + 细线
+    // 1) 先画"非当前"通道, 半透明 + 细线; 暗色通道(B)略提 alpha 保留可见
     auto otherColor = [](int ch) {
         QColor c = channelColor(ch);
-        c.setAlpha(150);   // 60%
+        // B 通道 (#14148c) 太暗, 在深底+低 alpha 下看不见, 单独提亮
+        c.setAlpha(ch == 3 ? 200 : 150);
         return c;
     };
-    if (m_channel != 0) drawOne(m_curves.master, otherColor(0), 1);
-    if (m_channel != 1) drawOne(m_curves.r,      otherColor(1), 1);
-    if (m_channel != 2) drawOne(m_curves.g,      otherColor(2), 1);
-    if (m_channel != 3) drawOne(m_curves.b,      otherColor(3), 1);
+    if (m_channel != 0) drawOne(m_curves.master, otherColor(0), 1.0);
+    if (m_channel != 1) drawOne(m_curves.r,      otherColor(1), 1.0);
+    if (m_channel != 2) drawOne(m_curves.g,      otherColor(2), 1.0);
+    if (m_channel != 3) drawOne(m_curves.b,      otherColor(3), 1.0);
 
     // 2) 当前通道在最上面, 高亮粗线
-    drawOne(curPts(), channelColor(m_channel), 2);
+    drawOne(curPts(), channelColor(m_channel), 2.0);
 
-    // 控制点 (只画当前通道)
-    p.setPen(QPen(Qt::black, 1));
-    p.setBrush(channelColor(m_channel));
-    for (const auto& pt : curPts()) {
-        QPoint sp = dataToScreen(pt.first, pt.second);
+    // 3) 控制点 (只画当前通道) — 大圆 + 通道色填充 + 白边, hover/drag 加发光环
+    const QColor chColor = channelColor(m_channel);
+    const QColor chColorOnDark = (m_channel == 3)
+        ? QColor(0x66, 0x66, 0xc8)             // 蓝色描点本体太暗, 用浅蓝替代填充
+        : chColor;
+    const auto& pts = curPts();
+    for (int i = 0; i < pts.size(); ++i) {
+        const QPoint sp = dataToScreen(pts[i].first, pts[i].second);
+        const bool active = (i == m_dragIdx) || (m_dragIdx < 0 && i == m_hoverIdx);
+        if (active) {
+            // 半透明发光环
+            QColor halo = chColorOnDark; halo.setAlpha(70);
+            p.setPen(Qt::NoPen);
+            p.setBrush(halo);
+            p.drawEllipse(sp, kHandleR + 4, kHandleR + 4);
+        }
+        // 外圈白边
+        p.setPen(QPen(QColor(245, 245, 245), 1.2));
+        p.setBrush(chColorOnDark);
         p.drawEllipse(sp, kHandleR, kHandleR);
+        // 中心暗芯
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(20, 20, 20));
+        p.drawEllipse(sp, 1, 1);
+    }
+
+    // 4) 坐标读数: 拖动中 / hover 命中点时, 在右上角显示 (x → y)
+    int readIdx = (m_dragIdx >= 0) ? m_dragIdx : m_hoverIdx;
+    if (readIdx >= 0 && readIdx < pts.size()) {
+        const QString txt = QStringLiteral("%1 → %2")
+                                .arg(pts[readIdx].first).arg(pts[readIdx].second);
+        QFont f = p.font();
+        f.setPointSizeF(f.pointSizeF() > 0 ? f.pointSizeF() : 9.0);
+        p.setFont(f);
+        const QFontMetrics fm(f);
+        const int tw = fm.horizontalAdvance(txt) + 10;
+        const int th = fm.height() + 4;
+        const QRect tagR(kPad + W - tw - 4, kPad + 4, tw, th);
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(0, 0, 0, 170));
+        p.drawRoundedRect(tagR, 3, 3);
+        p.setPen(chColorOnDark);
+        p.drawText(tagR, Qt::AlignCenter, txt);
+    }
+
+    // 5) 角标 0/255 — 帮助识别坐标范围
+    {
+        QFont f = p.font();
+        f.setPointSizeF(f.pointSizeF() > 0 ? f.pointSizeF() : 8.0);
+        p.setFont(f);
+        p.setPen(QColor(110, 110, 110));
+        p.drawText(QRect(kPad + 2, kPad + H - 14, 30, 12), Qt::AlignLeft | Qt::AlignVCenter,
+                   QStringLiteral("0"));
+        p.drawText(QRect(kPad + W - 32, kPad + H - 14, 30, 12), Qt::AlignRight | Qt::AlignVCenter,
+                   QStringLiteral("255"));
+        p.drawText(QRect(kPad + 2, kPad + 2, 30, 12), Qt::AlignLeft | Qt::AlignTop,
+                   QStringLiteral("255"));
     }
 }
 
@@ -201,6 +271,7 @@ void CurveEditor::mousePressEvent(QMouseEvent* e)
             }
             update();
             emit curvesChanged();
+            emit editingFinished();
         } else {
             m_dragIdx = idx;
         }
@@ -213,6 +284,7 @@ void CurveEditor::mousePressEvent(QMouseEvent* e)
             curPts().removeAt(idx);
             update();
             emit curvesChanged();
+            emit editingFinished();
         }
         e->accept();
         return;
@@ -222,7 +294,17 @@ void CurveEditor::mousePressEvent(QMouseEvent* e)
 
 void CurveEditor::mouseMoveEvent(QMouseEvent* e)
 {
-    if (m_dragIdx < 0) return;
+    m_hoverPos = e->pos();
+    if (m_dragIdx < 0) {
+        // 非拖拽: 只更新 hover 命中点 + 触发重绘 (用于发光环 / 坐标提示)
+        const int hi = findNearby(e->pos());
+        if (hi != m_hoverIdx) {
+            m_hoverIdx = hi;
+            update();
+        }
+        return;
+    }
+
     auto& pts = curPts();
     if (m_dragIdx >= pts.size()) { m_dragIdx = -1; return; }
 
@@ -237,6 +319,7 @@ void CurveEditor::mouseMoveEvent(QMouseEvent* e)
         d.setX(std::clamp(d.x(), prevX, nextX));
     }
     pts[m_dragIdx] = { d.x(), d.y() };
+    m_hoverIdx = m_dragIdx;
     update();
     emit curvesChanged();
     e->accept();
@@ -244,7 +327,21 @@ void CurveEditor::mouseMoveEvent(QMouseEvent* e)
 
 void CurveEditor::mouseReleaseEvent(QMouseEvent*)
 {
+    const bool wasDragging = (m_dragIdx >= 0);
     m_dragIdx = -1;
+    if (wasDragging) {
+        update();           // 清拖拽态发光环
+        emit editingFinished();
+    }
+}
+
+void CurveEditor::leaveEvent(QEvent*)
+{
+    if (m_dragIdx < 0 && (m_hoverIdx != -1 || m_hoverPos != QPoint(-1, -1))) {
+        m_hoverIdx = -1;
+        m_hoverPos = QPoint(-1, -1);
+        update();
+    }
 }
 
 } // namespace HighPro

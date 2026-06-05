@@ -37,12 +37,16 @@ public slots:
 
 signals:
     void curvesChanged();
+    // 鼠标释放 / 重置按钮 / 通道切换 — 用于 dialog 把"会话起点快照"提交到 undo 栈,
+    // 与 SliderRow 的 commit 语义一致, 避免一次拖动产生 N 个 undo 步.
+    void editingFinished();
 
 protected:
     void paintEvent(QPaintEvent* e) override;
     void mousePressEvent(QMouseEvent* e) override;
     void mouseMoveEvent(QMouseEvent* e) override;
     void mouseReleaseEvent(QMouseEvent* e) override;
+    void leaveEvent(QEvent* e) override;
     QSize sizeHint() const override { return QSize(256, 256); }
     QSize minimumSizeHint() const override { return QSize(180, 180); }
 
@@ -58,7 +62,9 @@ private:
     CurveParams m_curves;
     int         m_channel = 0;     // 0=master,1=R,2=G,3=B
 
-    int         m_dragIdx = -1;
+    int         m_dragIdx  = -1;
+    int         m_hoverIdx = -1;            // 鼠标悬停命中的控制点 (-1=无)
+    QPoint      m_hoverPos{ -1, -1 };       // 鼠标当前位置 (widget 坐标), -1=离开
 };
 
 } // namespace HighPro

@@ -911,110 +911,405 @@ void applyWeaponNonMetal(EffectStack& s, const SchemePalette& p, Rng& rng)
 }
 
 
-struct ColorSlotParams {
-    int hue = 0;
-    int jitter = 10;
-    int satLo = -20;
-    int satHi = 0;
-    int lgtLo = -8;
-    int lgtHi = 8;
-    int brtLo = -4;
-    int brtHi = 4;
-    int ctrLo = 2;
-    int ctrHi = 12;
-    int vibranceLo = -10;
-    int vibranceHi = 2;
-    int vibSatLo = -12;
-    int vibSatHi = 2;
-    int photoPreset = -1;
-    int photoLo = 3;
-    int photoHi = 9;
-    bool mono = false;
-    bool light = false;
-    bool dark = false;
-    bool metal = false;
+// =============================================================================
+// === 颜色 LayerSlot 多档子方案 (P2 优化) ===
+//
+// 设计目标:
+//   1. 每个色相提供 5~6 个 sub-variant (鲜艳/深/淡/哑光/莹光/金属等),
+//      单次随机时挑一档 + 档内大幅 jitter → 单击产生 30+ 不同视觉变化, 但都落在同色系内.
+//   2. 整体提亮 / 提饱: 有彩色 sat 改正向 (+10..+25 鲜艳档), lgt 允许正向, brt 不再强制压暗.
+//   3. 无彩色 (Black/White/Silver/Gray) 用 ChannelMixer monochrome 保留原图明暗梯度,
+//      White 大幅 brt 提亮到 +30, Black 大幅 brt 压到 -30, 配合多档曲线/染色.
+//   4. 部件 slot 后置: Hair 选稳重档, Decor02 选亮档, WeaponMetal 优先 metal 曲线档.
+//
+// 不改变: 部件 slot (Skin/Hair/Clothing/Skirt/Decor01/Decor02/WeaponMetal/WeaponNonMetal)
+//        本身的随机逻辑 — 颜色补丁只是在其上覆盖.
+// =============================================================================
+
+// 单档子方案. 有彩色用 hueOff/hueJit/sat/lgt; 无彩色用 monoR/G/B/monoBias.
+// brt/ctr/curve/photo 两路通用.
+struct ColorVariant {
+    int hueOff = 0;
+    int hueJit = 6;
+    int satLo = -10, satHi = 10;
+    int lgtLo = -8,  lgtHi = 8;
+    int brtLo = -4,  brtHi = 4;
+    int ctrLo = 0,   ctrHi = 10;
+    int vibLo = -8,  vibHi = 5;
+    int vsatLo = -10, vsatHi = 5;
+    int curve = 0;            // 0=soft 1=deep 2=highlight 3=metal 4=ultraBright 5=identity
+    int photoPreset = -1;     // -1 = 不开
+    int photoChance = 30;
+    int photoLo = 3, photoHi = 10;
+    // ColorBalance 目标 (任何分量非 0 即启用; apply 时 ±2 jitter)
+    int balSR=0, balSG=0, balSB=0;
+    int balMR=0, balMG=0, balMB=0;
+    int balHR=0, balHG=0, balHB=0;
+    // mono only
+    int monoR = 30, monoG = 59, monoB = 11;
+    int monoBias = 0;
 };
+
+struct ColorSlotParams {
+    int baseHue = 0;
+    bool useChMixMono = false;
+    QVector<ColorVariant> variants;
+};
+
+CurveParams::Pts curveByCode(int code) {
+    switch (code) {
+    case 1: return makeDeepSafeCurve();
+    case 2: return makeHighlightSafeCurve();
+    case 3: return CurveParams::Pts{ {0,6}, {64,48}, {128,122}, {200,218}, {255,248} };
+    case 4: return makeUltraBrightCurve();
+    case 5: return CurveParams::Pts{ {0,0}, {255,255} };
+    default: return makeSoftContrastCurve();
+    }
+}
 
 ColorSlotParams paramsForColorSlot(LayerColorSlot color)
 {
-    ColorSlotParams c;
+    // 有彩色 variant 构造器
+    auto V = [](int hueOff, int hueJit, int sLo, int sHi, int lLo, int lHi,
+                int bLo, int bHi, int cLo, int cHi, int curve,
+                int photoPreset, int photoChance) {
+        ColorVariant v;
+        v.hueOff = hueOff; v.hueJit = hueJit;
+        v.satLo = sLo; v.satHi = sHi;
+        v.lgtLo = lLo; v.lgtHi = lHi;
+        v.brtLo = bLo; v.brtHi = bHi;
+        v.ctrLo = cLo; v.ctrHi = cHi;
+        v.curve = curve;
+        v.photoPreset = photoPreset;
+        v.photoChance = photoChance;
+        v.vibLo  = -8;
+        v.vibHi  = std::max(0, sHi / 3);
+        v.vsatLo = -10;
+        v.vsatHi = std::max(0, sHi / 3);
+        return v;
+    };
+    // mono variant 构造器
+    auto M = [](int mR, int mG, int mB, int bias,
+                int bLo, int bHi, int cLo, int cHi, int curve,
+                int photoPreset, int photoChance) {
+        ColorVariant v;
+        v.monoR = mR; v.monoG = mG; v.monoB = mB; v.monoBias = bias;
+        v.brtLo = bLo; v.brtHi = bHi;
+        v.ctrLo = cLo; v.ctrHi = cHi;
+        v.curve = curve;
+        v.photoPreset = photoPreset;
+        v.photoChance = photoChance;
+        v.photoLo = 2; v.photoHi = 6;
+        return v;
+    };
+
+    ColorSlotParams p;
     switch (color) {
-    case LayerColorSlot::Red:    c.hue =   0; c.jitter = 10; c.satLo = -8;  c.satHi = 12; c.lgtLo = -18; c.lgtHi = -4; c.brtLo = -8;  c.brtHi = -2; c.ctrLo = 8;  c.ctrHi = 20; c.photoPreset = 6;  c.dark = true; break;
-    case LayerColorSlot::Orange: c.hue =  28; c.jitter = 10; c.satLo = -12; c.satHi = 8;  c.lgtLo = -10; c.lgtHi = 4;  c.brtLo = -4;  c.brtHi = 3;  c.ctrLo = 6;  c.ctrHi = 16; c.photoPreset = 7;  break;
-    case LayerColorSlot::Yellow: c.hue =  52; c.jitter = 8;  c.satLo = -18; c.satHi = 4;  c.lgtLo = -4;  c.lgtHi = 10; c.brtLo = 0;   c.brtHi = 5;  c.ctrLo = 2;  c.ctrHi = 12; c.photoPreset = 8;  c.light = true; break;
-    case LayerColorSlot::Green:  c.hue = 135; c.jitter = 18; c.satLo = -15; c.satHi = 8;  c.lgtLo = -20; c.lgtHi = -4; c.brtLo = -8;  c.brtHi = -2; c.ctrLo = 8;  c.ctrHi = 18; c.photoPreset = 9;  c.dark = true; break;
-    case LayerColorSlot::Cyan:   c.hue = 188; c.jitter = 12; c.satLo = -12; c.satHi = 10; c.lgtLo = -12; c.lgtHi = 8;  c.brtLo = -4;  c.brtHi = 5;  c.ctrLo = 4;  c.ctrHi = 16; c.photoPreset = 10; break;
-    case LayerColorSlot::Blue:   c.hue = 228; c.jitter = 14; c.satLo = -14; c.satHi = 8;  c.lgtLo = -20; c.lgtHi = -4; c.brtLo = -8;  c.brtHi = -2; c.ctrLo = 8;  c.ctrHi = 20; c.photoPreset = 11; c.dark = true; break;
-    case LayerColorSlot::Purple: c.hue = 278; c.jitter = 14; c.satLo = -14; c.satHi = 8;  c.lgtLo = -20; c.lgtHi = -4; c.brtLo = -8;  c.brtHi = -2; c.ctrLo = 8;  c.ctrHi = 20; c.photoPreset = 12; c.dark = true; break;
-    case LayerColorSlot::Pink:   c.hue = 328; c.jitter = 12; c.satLo = -20; c.satHi = 2;  c.lgtLo = -4;  c.lgtHi = 8;  c.brtLo = -2;  c.brtHi = 4;  c.ctrLo = 2;  c.ctrHi = 10; c.photoPreset = 13; c.light = true; break;
-    case LayerColorSlot::Black:  c.hue = 220; c.jitter = 20; c.satLo = -65; c.satHi = -35;c.lgtLo = -30; c.lgtHi = -12;c.brtLo = -14; c.brtHi = -5; c.ctrLo = 12; c.ctrHi = 26; c.photoPreset = 15; c.mono = true; c.dark = true; break;
-    case LayerColorSlot::White:  c.hue = 210; c.jitter = 12; c.satLo = -55; c.satHi = -25;c.lgtLo = 6;   c.lgtHi = 18; c.brtLo = 1;   c.brtHi = 6;  c.ctrLo = -4; c.ctrHi = 8;  c.photoPreset = 5;  c.mono = true; c.light = true; break;
-    case LayerColorSlot::Silver: c.hue = 215; c.jitter = 10; c.satLo = -50; c.satHi = -25;c.lgtLo = -2;  c.lgtHi = 10; c.brtLo = 0;   c.brtHi = 5;  c.ctrLo = 8;  c.ctrHi = 20; c.photoPreset = 3;  c.mono = true; c.metal = true; break;
-    case LayerColorSlot::Gray:   c.hue = 210; c.jitter = 18; c.satLo = -60; c.satHi = -35;c.lgtLo = -10; c.lgtHi = 8;  c.brtLo = -4;  c.brtHi = 4;  c.ctrLo = 4;  c.ctrHi = 14; c.photoPreset = 3;  c.mono = true; break;
-    case LayerColorSlot::Auto: break;
+    // ============ 有彩色 ============
+    case LayerColorSlot::Red:
+        p.baseHue = 0;
+        //          hueOff hueJit  sLo sHi  lLo lHi  bLo bHi  cLo cHi crv pho %
+        p.variants = {
+            V( 0,  4,  12, 28, -6,  6, -2,  6, 12, 24, 0,  6, 30),   // 鲜艳正红
+            V( 2,  6,   8, 22,-16, -4, -8, -2, 12, 26, 1, 15, 40),   // 深酒红
+            V(12,  8,   8, 22, -4,  8,  0,  6,  8, 18, 0,  7, 30),   // 朱红 (向橙)
+            V(-15, 6, -10, 14,  2, 12,  2,  8,  0, 12, 2, 13, 35),   // 玫瑰红 (向粉)
+            V( 0,  6, -22,  4, -8,  6, -4,  3,  0, 12, 0, -1, 0),    // 哑光红
+            V( 0,  5,  10, 25, -2,  8,  2,  8,  6, 16, 4, -1, 0),    // 高光正红
+        };
+        break;
+    case LayerColorSlot::Orange:
+        p.baseHue = 28;
+        p.variants = {
+            V( 0,  4,  12, 28, -2,  8,  0,  6,  8, 18, 0,  7, 30),   // 鲜艳橙
+            V(-4,  6,  10, 24,-12, -2, -6,  0, 12, 24, 1, 14, 40),   // 焦糖橙
+            V( 8,  8,   5, 20,  2, 12,  2,  6,  0, 12, 0,  8, 30),   // 杏橙
+            V(-10, 6,   8, 22, -4,  6, -2,  4,  8, 18, 0,  6, 30),   // 红橙
+            V( 0,  6, -15, 10, -4,  8, -2,  4,  0, 10, 0, -1, 0),    // 哑光橙
+            V( 0,  5,   8, 22, -2,  4,  0,  4, 18, 30, 3, -1, 0),    // 金属橙
+        };
+        break;
+    case LayerColorSlot::Yellow:
+        p.baseHue = 52;
+        p.variants = {
+            V( 0,  4,  12, 28,  0, 10,  2, 10,  4, 14, 0,  8, 30),   // 明黄
+            V(-6,  6,  12, 26, -4,  4,  0,  6, 10, 22, 3, 17, 40),   // 金黄 (向橙, 金属)
+            V( 8,  6,   8, 22,  2, 12,  2,  6,  0, 12, 0,  9, 30),   // 柠檬黄 (向绿)
+            V( 0,  6, -22,  4,  2, 12,  0,  6,  0, 10, 0, -1, 0),    // 哑光黄
+            V( 0,  5,   8, 22,  4, 16,  4, 12, -2,  8, 4,  8, 25),   // 高光明黄
+            V( 0,  6,  -8, 12,  4, 14,  2,  8,  0, 10, 2, 14, 25),   // 米黄/沙黄
+        };
+        break;
+    case LayerColorSlot::Green:
+        p.baseHue = 135;
+        p.variants = {
+            V( 0,  6,  12, 28, -4,  6,  0,  6, 10, 22, 0,  9, 30),   // 鲜艳绿
+            V(10,  8,  12, 26,-16, -4, -8, -2, 12, 26, 1, 16, 40),   // 深翠绿 (向青)
+            V(-15, 8,   8, 22,  2, 12,  2,  6,  0, 12, 0,  9, 30),   // 嫩绿 (向黄)
+            V( 0,  8,   8, 20, -4,  8, -2,  4,  4, 14, 0,  9, 30),   // 草绿
+            V( 0,  8, -22,  6, -8,  6, -4,  2,  0, 10, 0, -1, 0),    // 哑光绿
+            V( 0,  6,  15, 30,  2, 12,  2,  8,  0, 10, 4,  9, 40),   // 莹光绿
+        };
+        break;
+    case LayerColorSlot::Cyan:
+        p.baseHue = 188;
+        p.variants = {
+            V( 0,  4,  12, 28, -2,  8,  0,  6,  8, 20, 0, 10, 30),   // 鲜艳青
+            V( 0,  6,  10, 24,-14, -2, -6,  0, 10, 22, 1, 11, 40),   // 深青
+            V(15,  8,   8, 22, -6,  6, -2,  4,  8, 18, 0, 11, 30),   // 蓝青
+            V(-15, 8,   8, 22, -2,  8,  0,  6,  4, 14, 0,  9, 30),   // 绿青
+            V( 0,  6, -18,  8, -6,  6, -2,  4,  0, 12, 0, -1, 0),    // 哑光青
+            V( 0,  6,  15, 30,  0, 12,  2, 10,  0, 10, 4, 10, 40),   // 莹光青
+        };
+        break;
+    case LayerColorSlot::Blue:
+        p.baseHue = 228;
+        p.variants = {
+            V( 0,  4,  12, 28, -6,  6, -2,  4,  8, 20, 0, 11, 30),   // 鲜艳蓝
+            V( 0,  6,  10, 26,-18, -4, -8, -2, 12, 26, 1, 15, 40),   // 海军蓝
+            V(-12, 8,   8, 22,  0, 12,  2,  6,  0, 12, 0,  4, 30),   // 天蓝 (向青)
+            V(12,  8,   8, 22, -8,  4, -2,  4,  4, 14, 0, 12, 30),   // 紫蓝
+            V( 0,  6, -18,  8, -6,  6, -2,  2,  0, 10, 0, -1, 0),    // 哑光蓝
+            V( 0,  6,  15, 30,  0, 12,  2, 10,  0, 10, 4, 11, 35),   // 莹光蓝
+        };
+        break;
+    case LayerColorSlot::Purple:
+        p.baseHue = 278;
+        p.variants = {
+            V( 0,  4,  12, 28, -4,  8, -2,  4,  8, 20, 0, 12, 30),   // 鲜艳紫
+            V( 0,  6,  10, 26,-16, -2, -6,  0, 10, 24, 1, 12, 40),   // 深紫
+            V(-15, 8,   8, 22, -6,  6, -2,  4,  4, 14, 0, 11, 30),   // 蓝紫
+            V(15,  8,   8, 22, -2,  8,  0,  6,  4, 14, 0, 13, 30),   // 玫紫
+            V( 0,  8, -18,  8, -4,  8, -2,  4,  0, 12, 0, -1, 0),    // 灰紫/哑光
+            V( 0,  6,  15, 30,  0, 12,  2, 10,  0, 10, 4, 12, 35),   // 莹光紫
+        };
+        break;
+    case LayerColorSlot::Pink:
+        p.baseHue = 340;
+        p.variants = {
+            V( 0,  4,  -8, 18,  4, 14,  4, 10,  0, 10, 2, 13, 30),   // 樱花粉
+            V(-10, 6,   8, 22,  0,  8,  0,  6,  4, 14, 0, 13, 35),   // 玫瑰粉 (向红)
+            V(15,  8,   2, 18,  2, 12,  2,  8,  0, 10, 0, 13, 30),   // 桃粉 (向橙)
+            V( 0,  6, -28, -2,  4, 16,  4, 10,  0,  8, 2, -1, 0),    // 哑光淡粉
+            V(-4,  4,  12, 28, -4,  6, -2,  4,  6, 16, 0, 13, 35),   // 高饱品红
+            V( 0,  6,   5, 20,  6, 16,  4, 12,  0, 10, 4, 13, 40),   // 莹光粉
+        };
+        break;
+
+    // ============ 无彩色 (ChannelMixer monochrome) ============
+    case LayerColorSlot::Black:
+        p.useChMixMono = true;
+        //          mR  mG  mB  bias  bLo  bHi  cLo cHi crv pho %
+        p.variants = {
+            M(30, 59, 11, -10, -32, -20, 15, 30, 1,  -1, 0),         // 纯黑
+            M(28, 56, 16,  -6, -24, -14, 10, 24, 1, 15, 30),         // 墨黑 (略偏冷)
+            M(30, 59, 11,  -3, -18,  -8,  6, 18, 0,  -1, 0),         // 灰黑/哑光
+            M(26, 56, 18,  -8, -28, -16, 12, 26, 1, 15, 45),         // 冷黑
+            M(34, 56, 10,  -8, -28, -16, 12, 26, 1, 14, 35),         // 暖黑/墨棕
+            M(32, 58, 10,  -5, -22, -12,  8, 20, 5,  -1, 0),         // 软黑 (无对比曲线)
+        };
+        // 冷/暖黑分别加 ColorBalance 阴影染色
+        p.variants[3].balSR = -4; p.variants[3].balSB = 8;
+        p.variants[4].balSR =  6; p.variants[4].balSG = 2; p.variants[4].balSB = -4;
+        break;
+    case LayerColorSlot::White:
+        p.useChMixMono = true;
+        p.variants = {
+            M(33, 55, 12,  12,  20,  32, -4, 12, 2,  -1, 0),         // 纯白
+            M(30, 59, 11,   8,  15,  26, -4,  6, 4,  -1, 0),         // 雪白 (ultraBright)
+            M(28, 58, 14,   2,   2,  12, 12, 26, 3,  -1, 0),         // 银白 (metal)
+            M(34, 54, 12,  10,  16,  28, -2,  8, 2,  0, 35),         // 暖白
+            M(30, 56, 14,  10,  16,  28, -2,  8, 2,  5, 35),         // 冷白
+            M(32, 55, 13,   6,  10,  22,  0, 10, 0,  2, 25),         // 米白
+        };
+        p.variants[3].balHR = 6; p.variants[3].balHG = 2;             // 高光暖
+        p.variants[4].balHR = -4; p.variants[4].balHB = 8;            // 高光冷
+        p.variants[5].balHR = 3; p.variants[5].balHG = 1;             // 米白微暖
+        break;
+    case LayerColorSlot::Silver:
+        p.useChMixMono = true;
+        p.variants = {
+            M(28, 58, 14,   3,   5,  16, 14, 26, 3,  3, 30),         // 亮银
+            M(28, 58, 14,  -2,  -8,   4, 12, 22, 3,  3, 30),         // 暗银
+            M(26, 58, 16,   2,   0,  10, 12, 24, 3,  3, 45),         // 冷钢银
+            M(33, 55, 12,   4,   4,  14, 12, 24, 3,  2, 30),         // 钛银 (微暖)
+            M(28, 58, 14,   3,   5,  14, 18, 32, 3, -1, 0),          // 镜面银 (强对比)
+            M(30, 59, 11,   0,  -4,   8,  6, 16, 0, -1, 0),          // 哑光银
+        };
+        p.variants[2].balSR = -3; p.variants[2].balSB = 6;
+        p.variants[2].balHR = -4; p.variants[2].balHB = 8;
+        p.variants[3].balHR = 4;  p.variants[3].balHG = 1;
+        break;
+    case LayerColorSlot::Gray:
+        p.useChMixMono = true;
+        p.variants = {
+            M(30, 59, 11,   0,  -6,   6,  2, 12, 0, -1, 0),          // 中性灰
+            M(31, 58, 11,   6,   6,  16,  0, 10, 0, -1, 0),          // 浅灰
+            M(30, 59, 11,  -8, -16,  -6,  6, 18, 1, -1, 0),          // 深灰
+            M(33, 56, 11,   2,  -4,   8,  2, 12, 0,  0, 35),         // 暖灰
+            M(28, 58, 14,   2,  -4,   8,  2, 12, 0,  3, 35),         // 冷灰
+            M(28, 58, 14,   4,   0,  10, 10, 22, 3,  3, 30),         // 钢灰 (metal)
+        };
+        p.variants[3].balMR = 5; p.variants[3].balMG = 2; p.variants[3].balMB = -4;
+        p.variants[4].balMR = -3; p.variants[4].balMB = 6;
+        break;
+
+    case LayerColorSlot::Auto:
+        break;
     }
-    return c;
+    return p;
 }
 
 void applyColorSlotPatch(EffectStack& s, LayerSlot slot, LayerColorSlot color, Rng& rng)
 {
-    if (color == LayerColorSlot::Auto || slot == LayerSlot::Skin) return;
+    // 不再用 slot == Skin 做早返回:
+    //   1) 肤色保护层由 ProjectController::isSkinSafe() 在调用前短路, 不会进到这里.
+    //   2) body 层默认 slotFor() = Skin, 但 body 实际是普通图层 (跟 00/01/.../addon 同性质),
+    //      用户主动指定颜色 LayerSlot 时必须生效.
+    if (color == LayerColorSlot::Auto) return;
 
-    ColorSlotParams c = paramsForColorSlot(color);
-    if (slot == LayerSlot::Hair) {
-        c.satLo = std::min(c.satLo, -20);
-        c.satHi = std::min(c.satHi, 0);
-        c.lgtLo = std::max(c.lgtLo, -14);
-        c.lgtHi = std::min(c.lgtHi, 12);
-    } else if (slot == LayerSlot::Decor01) {
-        c.satLo += 4;
-        c.satHi += 6;
-        c.lgtLo += 2;
-        c.lgtHi += 4;
-    } else if (slot == LayerSlot::Decor02) {
-        if (color == LayerColorSlot::Black || color == LayerColorSlot::Gray) {
-            c = paramsForColorSlot(color == LayerColorSlot::Black ? LayerColorSlot::Blue : LayerColorSlot::Silver);
-        }
-        c.satLo += 2;
-        c.satHi += 8;
-        c.lgtLo += 4;
-        c.lgtHi += 8;
+    ColorSlotParams p = paramsForColorSlot(color);
+    if (p.variants.isEmpty()) return;
+
+    // ===== 部件 slot 后置: 转色 (失语义的强制改) =====
+    if (slot == LayerSlot::Decor02
+        && (color == LayerColorSlot::Black || color == LayerColorSlot::Gray)) {
+        // 发光位强行黑/灰失"发光"语义 → 转 Blue/Silver
+        p = paramsForColorSlot(color == LayerColorSlot::Black ? LayerColorSlot::Blue : LayerColorSlot::Silver);
     } else if (slot == LayerSlot::WeaponMetal) {
-        if (color == LayerColorSlot::Yellow || color == LayerColorSlot::Orange) c = paramsForColorSlot(LayerColorSlot::Yellow);
-        else if (color == LayerColorSlot::Black) c = paramsForColorSlot(LayerColorSlot::Black);
-        else if (color == LayerColorSlot::Cyan || color == LayerColorSlot::Blue) c = paramsForColorSlot(LayerColorSlot::Silver);
-        else c = paramsForColorSlot(LayerColorSlot::Silver);
-        c.metal = true;
+        if (color == LayerColorSlot::Yellow || color == LayerColorSlot::Orange)
+            p = paramsForColorSlot(LayerColorSlot::Yellow);
+        else if (color == LayerColorSlot::Cyan || color == LayerColorSlot::Blue
+              || color == LayerColorSlot::Green || color == LayerColorSlot::Pink
+              || color == LayerColorSlot::Purple)
+            p = paramsForColorSlot(LayerColorSlot::Silver);
+        // Red / Black / White / Silver / Gray / Auto → 保持
     }
 
-    s.enabled[EffectStack::EHsl] = true;
-    const int hueAbs = (c.hue + rng.irange(-c.jitter, c.jitter) + 360) % 360;
-    s.hsl.hue = hueAbsToShift(hueAbs);
-    s.hsl.saturation = std::clamp(rng.irange(c.satLo, c.satHi), -100, 100);
-    s.hsl.lightness = std::clamp(rng.irange(c.lgtLo, c.lgtHi), -45, 28);
+    // ===== 选档: 部件不同 → variant 候选不同 =====
+    const int vCount = p.variants.size();
+    int vIdx = 0;
+    switch (slot) {
+    case LayerSlot::Hair:
+        // 头发偏稳重 → 前 4 档 (鲜艳/深/淡 等), 避开过度莹光/金属
+        vIdx = rng.irange(0, std::min(vCount - 1, 3));
+        break;
+    case LayerSlot::Decor02: {
+        // 发光点偏亮 → 后半档 (莹光/高光优先)
+        int lo = std::min(vCount - 1, vCount / 2);
+        vIdx = rng.irange(lo, vCount - 1);
+        break;
+    }
+    case LayerSlot::WeaponMetal: {
+        // 金属优先 metal 曲线档
+        int found = -1;
+        for (int i = 0; i < vCount; ++i) if (p.variants[i].curve == 3) { found = i; break; }
+        vIdx = (found >= 0 && rng.chance(70)) ? found : rng.irange(0, vCount - 1);
+        break;
+    }
+    default:
+        vIdx = rng.irange(0, vCount - 1);
+        break;
+    }
 
-    s.enabled[EffectStack::EBrtCtr] = true;
-    s.brtCtr.brightness = std::clamp(rng.irange(c.brtLo, c.brtHi), -25, 15);
-    s.brtCtr.contrast = std::clamp(rng.irange(c.ctrLo, c.ctrHi), -20, 30);
+    ColorVariant v = p.variants[vIdx];
 
-    s.enabled[EffectStack::EVibrance] = true;
-    s.vibrance.vibrance = std::clamp(rng.irange(c.vibranceLo, c.vibranceHi), -100, 100);
-    s.vibrance.saturation = std::clamp(rng.irange(c.vibSatLo, c.vibSatHi), -100, 100);
+    // 部件细化微调
+    if (slot == LayerSlot::Hair) {
+        v.satHi = std::min(v.satHi, 22);
+        v.lgtLo = std::max(v.lgtLo, -14);
+        v.lgtHi = std::min(v.lgtHi, 14);
+        v.brtLo = std::max(v.brtLo, -14);
+        v.brtHi = std::min(v.brtHi, 12);
+        if (p.useChMixMono) v.monoBias = std::clamp(v.monoBias, -10, 10);
+    } else if (slot == LayerSlot::Decor01) {
+        v.satLo += 2; v.satHi += 4;
+        v.lgtLo += 1; v.lgtHi += 3;
+        v.brtLo += 1; v.brtHi += 2;
+        if (p.useChMixMono) v.monoBias += 2;
+    } else if (slot == LayerSlot::Decor02) {
+        v.satHi += 6;
+        v.lgtHi += 4;
+        v.brtLo += 2; v.brtHi += 4;
+        if (p.useChMixMono) v.monoBias += 4;
+        v.photoChance = std::min(80, v.photoChance + 15);
+    } else if (slot == LayerSlot::WeaponMetal) {
+        // 金属强对比 + 强制 metal 曲线
+        v.curve = 3;
+        v.ctrLo = std::max(v.ctrLo, 12);
+        v.ctrHi = std::max(v.ctrHi, 24);
+    }
 
+    // ===== 应用到 EffectStack =====
+    if (p.useChMixMono) {
+        // ----- Mono 路径 -----
+        s.enabled[EffectStack::EHsl] = false; s.hsl.reset();
+        s.enabled[EffectStack::EVibrance] = false; s.vibrance.reset();
+
+        s.enabled[EffectStack::EChMix] = true;
+        s.chMix.monochrome = true;
+        s.chMix.rr = v.monoR; s.chMix.rg = v.monoG; s.chMix.rb = v.monoB;
+        s.chMix.r_const = std::clamp(v.monoBias, -50, 50);
+        s.chMix.gr = 0; s.chMix.gg = 100; s.chMix.gb = 0; s.chMix.g_const = 0;
+        s.chMix.br = 0; s.chMix.bg = 0;   s.chMix.bb = 100; s.chMix.b_const = 0;
+
+        s.enabled[EffectStack::EBrtCtr] = true;
+        s.brtCtr.brightness = std::clamp(rng.irange(v.brtLo, v.brtHi), -50, 40);
+        s.brtCtr.contrast   = std::clamp(rng.irange(v.ctrLo, v.ctrHi), -25, 40);
+    } else {
+        // ----- 有彩色路径 -----
+        s.enabled[EffectStack::EChMix] = false; s.chMix.reset();
+
+        s.enabled[EffectStack::EHsl] = true;
+        const int hueAbs = (p.baseHue + v.hueOff + rng.irange(-v.hueJit, v.hueJit) + 360) % 360;
+        s.hsl.hue = hueAbsToShift(hueAbs);
+        s.hsl.saturation = std::clamp(rng.irange(v.satLo, v.satHi), -100, 100);
+        s.hsl.lightness  = std::clamp(rng.irange(v.lgtLo, v.lgtHi), -45, 30);
+
+        s.enabled[EffectStack::EBrtCtr] = true;
+        s.brtCtr.brightness = std::clamp(rng.irange(v.brtLo, v.brtHi), -30, 25);
+        s.brtCtr.contrast   = std::clamp(rng.irange(v.ctrLo, v.ctrHi), -25, 35);
+
+        s.enabled[EffectStack::EVibrance] = true;
+        s.vibrance.vibrance   = std::clamp(rng.irange(v.vibLo, v.vibHi), -100, 100);
+        s.vibrance.saturation = std::clamp(rng.irange(v.vsatLo, v.vsatHi), -100, 100);
+    }
+
+    // 曲线 (通用)
     s.enabled[EffectStack::ECurves] = true;
-    if (c.metal) s.curves.master = CurveParams::Pts{ {0, 6}, {64, 48}, {128, 122}, {200, 218}, {255, 248} };
-    else if (c.dark) s.curves.master = makeDeepSafeCurve();
-    else if (c.light) s.curves.master = makeHighlightSafeCurve();
-    else s.curves.master = makeSoftContrastCurve();
+    s.curves.master = curveByCode(v.curve);
+    s.curves.r = CurveParams::Pts{ {0,0}, {255,255} };
+    s.curves.g = s.curves.r;
+    s.curves.b = s.curves.r;
 
-    if (c.photoPreset >= 0 && c.photoPreset < kPhotoFilterPresetCount && rng.chance(c.mono ? 25 : 45)) {
+    // ColorBalance: 任何分量非 0 即启用, ±2 jitter 让档内再分裂
+    const bool hasBal = (v.balSR | v.balSG | v.balSB
+                       | v.balMR | v.balMG | v.balMB
+                       | v.balHR | v.balHG | v.balHB) != 0;
+    if (hasBal) {
+        s.enabled[EffectStack::EColorBal] = true;
+        s.colorBal.preserveLuma = true;
+        auto jit = [&](int t) { return t == 0 ? 0 : t + rng.irange(-2, 2); };
+        s.colorBal.sR = jit(v.balSR); s.colorBal.sG = jit(v.balSG); s.colorBal.sB = jit(v.balSB);
+        s.colorBal.mR = jit(v.balMR); s.colorBal.mG = jit(v.balMG); s.colorBal.mB = jit(v.balMB);
+        s.colorBal.hR = jit(v.balHR); s.colorBal.hG = jit(v.balHG); s.colorBal.hB = jit(v.balHB);
+    } else {
+        s.enabled[EffectStack::EColorBal] = false;
+        s.colorBal.reset();
+    }
+
+    // PhotoFilter
+    if (v.photoPreset >= 0 && v.photoPreset < kPhotoFilterPresetCount
+        && rng.chance(v.photoChance)) {
         s.enabled[EffectStack::EPhotoFilter] = true;
-        s.photoFilter.preset = c.photoPreset;
-        s.photoFilter.filterR = kPhotoFilterPresets[c.photoPreset].r;
-        s.photoFilter.filterG = kPhotoFilterPresets[c.photoPreset].g;
-        s.photoFilter.filterB = kPhotoFilterPresets[c.photoPreset].b;
-        s.photoFilter.density = rng.irange(c.photoLo, c.photoHi);
+        s.photoFilter.preset  = v.photoPreset;
+        s.photoFilter.filterR = kPhotoFilterPresets[v.photoPreset].r;
+        s.photoFilter.filterG = kPhotoFilterPresets[v.photoPreset].g;
+        s.photoFilter.filterB = kPhotoFilterPresets[v.photoPreset].b;
+        s.photoFilter.density = std::clamp(rng.irange(v.photoLo, v.photoHi), 0, 50);
         s.photoFilter.preserveLuma = true;
+    } else {
+        s.enabled[EffectStack::EPhotoFilter] = false;
     }
 }
 
