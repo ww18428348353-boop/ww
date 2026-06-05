@@ -287,6 +287,15 @@ QJsonObject ProjectIO::projectToJson(const Project& p)
         o["layerSlots"] = m;
     }
     {
+        // P1: layerColorSlots — { "num_00": "Blue", ... }. Auto 不写.
+        QJsonObject m;
+        for (auto it = p.layerColorSlots.constBegin(); it != p.layerColorSlots.constEnd(); ++it) {
+            if (it.value() == LayerColorSlot::Auto) continue;
+            m[it.key()] = layerColorSlotToString(it.value());
+        }
+        o["layerColorSlots"] = m;
+    }
+    {
         QJsonObject m;
         for (auto it = p.layerLutPath.constBegin(); it != p.layerLutPath.constEnd(); ++it) {
             m[it.key()] = it.value();
@@ -335,6 +344,25 @@ void ProjectIO::projectFromJson(const QJsonObject& obj, Project& out)
             }
             if (slot != LayerSlot::Unknown) {
                 out.layerSlots.insert(it.key(), slot);
+            }
+        }
+    }
+
+    // P1: layerColorSlots 兼容. 缺字段 = 全部 Auto.
+    out.layerColorSlots.clear();
+    if (obj.contains("layerColorSlots") && obj["layerColorSlots"].isObject()) {
+        QJsonObject m = obj["layerColorSlots"].toObject();
+        for (auto it = m.constBegin(); it != m.constEnd(); ++it) {
+            LayerColorSlot slot;
+            if (it.value().isString()) {
+                slot = layerColorSlotFromString(it.value().toString());
+            } else {
+                const int iv = it.value().toInt(0);
+                slot = (iv > 0 && iv <= (int)LayerColorSlot::Gray)
+                       ? static_cast<LayerColorSlot>(iv) : LayerColorSlot::Auto;
+            }
+            if (slot != LayerColorSlot::Auto) {
+                out.layerColorSlots.insert(it.key(), slot);
             }
         }
     }

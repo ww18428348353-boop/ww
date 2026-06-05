@@ -194,6 +194,7 @@ struct Rng {
     int   irange(int lo, int hi)        { std::uniform_int_distribution<int> d(lo, hi); return d(r); }
     bool  chance(int pct)               { return irange(0, 99) < pct; }
     int   sign()                        { return chance(50) ? -1 : 1; }
+    quint32 nextSeed()                  { return static_cast<quint32>(r()); }
 };
 
 // hue 0..359 → AE HSL hue -180..180 (相对原图色相的偏移).
@@ -909,6 +910,114 @@ void applyWeaponNonMetal(EffectStack& s, const SchemePalette& p, Rng& rng)
     }
 }
 
+
+struct ColorSlotParams {
+    int hue = 0;
+    int jitter = 10;
+    int satLo = -20;
+    int satHi = 0;
+    int lgtLo = -8;
+    int lgtHi = 8;
+    int brtLo = -4;
+    int brtHi = 4;
+    int ctrLo = 2;
+    int ctrHi = 12;
+    int vibranceLo = -10;
+    int vibranceHi = 2;
+    int vibSatLo = -12;
+    int vibSatHi = 2;
+    int photoPreset = -1;
+    int photoLo = 3;
+    int photoHi = 9;
+    bool mono = false;
+    bool light = false;
+    bool dark = false;
+    bool metal = false;
+};
+
+ColorSlotParams paramsForColorSlot(LayerColorSlot color)
+{
+    ColorSlotParams c;
+    switch (color) {
+    case LayerColorSlot::Red:    c.hue =   0; c.jitter = 10; c.satLo = -8;  c.satHi = 12; c.lgtLo = -18; c.lgtHi = -4; c.brtLo = -8;  c.brtHi = -2; c.ctrLo = 8;  c.ctrHi = 20; c.photoPreset = 6;  c.dark = true; break;
+    case LayerColorSlot::Orange: c.hue =  28; c.jitter = 10; c.satLo = -12; c.satHi = 8;  c.lgtLo = -10; c.lgtHi = 4;  c.brtLo = -4;  c.brtHi = 3;  c.ctrLo = 6;  c.ctrHi = 16; c.photoPreset = 7;  break;
+    case LayerColorSlot::Yellow: c.hue =  52; c.jitter = 8;  c.satLo = -18; c.satHi = 4;  c.lgtLo = -4;  c.lgtHi = 10; c.brtLo = 0;   c.brtHi = 5;  c.ctrLo = 2;  c.ctrHi = 12; c.photoPreset = 8;  c.light = true; break;
+    case LayerColorSlot::Green:  c.hue = 135; c.jitter = 18; c.satLo = -15; c.satHi = 8;  c.lgtLo = -20; c.lgtHi = -4; c.brtLo = -8;  c.brtHi = -2; c.ctrLo = 8;  c.ctrHi = 18; c.photoPreset = 9;  c.dark = true; break;
+    case LayerColorSlot::Cyan:   c.hue = 188; c.jitter = 12; c.satLo = -12; c.satHi = 10; c.lgtLo = -12; c.lgtHi = 8;  c.brtLo = -4;  c.brtHi = 5;  c.ctrLo = 4;  c.ctrHi = 16; c.photoPreset = 10; break;
+    case LayerColorSlot::Blue:   c.hue = 228; c.jitter = 14; c.satLo = -14; c.satHi = 8;  c.lgtLo = -20; c.lgtHi = -4; c.brtLo = -8;  c.brtHi = -2; c.ctrLo = 8;  c.ctrHi = 20; c.photoPreset = 11; c.dark = true; break;
+    case LayerColorSlot::Purple: c.hue = 278; c.jitter = 14; c.satLo = -14; c.satHi = 8;  c.lgtLo = -20; c.lgtHi = -4; c.brtLo = -8;  c.brtHi = -2; c.ctrLo = 8;  c.ctrHi = 20; c.photoPreset = 12; c.dark = true; break;
+    case LayerColorSlot::Pink:   c.hue = 328; c.jitter = 12; c.satLo = -20; c.satHi = 2;  c.lgtLo = -4;  c.lgtHi = 8;  c.brtLo = -2;  c.brtHi = 4;  c.ctrLo = 2;  c.ctrHi = 10; c.photoPreset = 13; c.light = true; break;
+    case LayerColorSlot::Black:  c.hue = 220; c.jitter = 20; c.satLo = -65; c.satHi = -35;c.lgtLo = -30; c.lgtHi = -12;c.brtLo = -14; c.brtHi = -5; c.ctrLo = 12; c.ctrHi = 26; c.photoPreset = 15; c.mono = true; c.dark = true; break;
+    case LayerColorSlot::White:  c.hue = 210; c.jitter = 12; c.satLo = -55; c.satHi = -25;c.lgtLo = 6;   c.lgtHi = 18; c.brtLo = 1;   c.brtHi = 6;  c.ctrLo = -4; c.ctrHi = 8;  c.photoPreset = 5;  c.mono = true; c.light = true; break;
+    case LayerColorSlot::Silver: c.hue = 215; c.jitter = 10; c.satLo = -50; c.satHi = -25;c.lgtLo = -2;  c.lgtHi = 10; c.brtLo = 0;   c.brtHi = 5;  c.ctrLo = 8;  c.ctrHi = 20; c.photoPreset = 3;  c.mono = true; c.metal = true; break;
+    case LayerColorSlot::Gray:   c.hue = 210; c.jitter = 18; c.satLo = -60; c.satHi = -35;c.lgtLo = -10; c.lgtHi = 8;  c.brtLo = -4;  c.brtHi = 4;  c.ctrLo = 4;  c.ctrHi = 14; c.photoPreset = 3;  c.mono = true; break;
+    case LayerColorSlot::Auto: break;
+    }
+    return c;
+}
+
+void applyColorSlotPatch(EffectStack& s, LayerSlot slot, LayerColorSlot color, Rng& rng)
+{
+    if (color == LayerColorSlot::Auto || slot == LayerSlot::Skin) return;
+
+    ColorSlotParams c = paramsForColorSlot(color);
+    if (slot == LayerSlot::Hair) {
+        c.satLo = std::min(c.satLo, -20);
+        c.satHi = std::min(c.satHi, 0);
+        c.lgtLo = std::max(c.lgtLo, -14);
+        c.lgtHi = std::min(c.lgtHi, 12);
+    } else if (slot == LayerSlot::Decor01) {
+        c.satLo += 4;
+        c.satHi += 6;
+        c.lgtLo += 2;
+        c.lgtHi += 4;
+    } else if (slot == LayerSlot::Decor02) {
+        if (color == LayerColorSlot::Black || color == LayerColorSlot::Gray) {
+            c = paramsForColorSlot(color == LayerColorSlot::Black ? LayerColorSlot::Blue : LayerColorSlot::Silver);
+        }
+        c.satLo += 2;
+        c.satHi += 8;
+        c.lgtLo += 4;
+        c.lgtHi += 8;
+    } else if (slot == LayerSlot::WeaponMetal) {
+        if (color == LayerColorSlot::Yellow || color == LayerColorSlot::Orange) c = paramsForColorSlot(LayerColorSlot::Yellow);
+        else if (color == LayerColorSlot::Black) c = paramsForColorSlot(LayerColorSlot::Black);
+        else if (color == LayerColorSlot::Cyan || color == LayerColorSlot::Blue) c = paramsForColorSlot(LayerColorSlot::Silver);
+        else c = paramsForColorSlot(LayerColorSlot::Silver);
+        c.metal = true;
+    }
+
+    s.enabled[EffectStack::EHsl] = true;
+    const int hueAbs = (c.hue + rng.irange(-c.jitter, c.jitter) + 360) % 360;
+    s.hsl.hue = hueAbsToShift(hueAbs);
+    s.hsl.saturation = std::clamp(rng.irange(c.satLo, c.satHi), -100, 100);
+    s.hsl.lightness = std::clamp(rng.irange(c.lgtLo, c.lgtHi), -45, 28);
+
+    s.enabled[EffectStack::EBrtCtr] = true;
+    s.brtCtr.brightness = std::clamp(rng.irange(c.brtLo, c.brtHi), -25, 15);
+    s.brtCtr.contrast = std::clamp(rng.irange(c.ctrLo, c.ctrHi), -20, 30);
+
+    s.enabled[EffectStack::EVibrance] = true;
+    s.vibrance.vibrance = std::clamp(rng.irange(c.vibranceLo, c.vibranceHi), -100, 100);
+    s.vibrance.saturation = std::clamp(rng.irange(c.vibSatLo, c.vibSatHi), -100, 100);
+
+    s.enabled[EffectStack::ECurves] = true;
+    if (c.metal) s.curves.master = CurveParams::Pts{ {0, 6}, {64, 48}, {128, 122}, {200, 218}, {255, 248} };
+    else if (c.dark) s.curves.master = makeDeepSafeCurve();
+    else if (c.light) s.curves.master = makeHighlightSafeCurve();
+    else s.curves.master = makeSoftContrastCurve();
+
+    if (c.photoPreset >= 0 && c.photoPreset < kPhotoFilterPresetCount && rng.chance(c.mono ? 25 : 45)) {
+        s.enabled[EffectStack::EPhotoFilter] = true;
+        s.photoFilter.preset = c.photoPreset;
+        s.photoFilter.filterR = kPhotoFilterPresets[c.photoPreset].r;
+        s.photoFilter.filterG = kPhotoFilterPresets[c.photoPreset].g;
+        s.photoFilter.filterB = kPhotoFilterPresets[c.photoPreset].b;
+        s.photoFilter.density = rng.irange(c.photoLo, c.photoHi);
+        s.photoFilter.preserveLuma = true;
+    }
+}
+
 } // namespace
 
 void randomizeStackBySlot(EffectStack& s,
@@ -932,6 +1041,22 @@ void randomizeStackBySlot(EffectStack& s,
         applyClothing(s, palette, rng);
         break;
     }
+}
+
+void randomizeStackBySlot(EffectStack& s,
+                          LayerSlot slot,
+                          LayerColorSlot colorSlot,
+                          const SchemePalette& palette,
+                          quint32 seed)
+{
+    if (colorSlot == LayerColorSlot::Auto) {
+        randomizeStackBySlot(s, slot, palette, seed);
+        return;
+    }
+
+    Rng rng(seed);
+    randomizeStackBySlot(s, slot, palette, rng.nextSeed());
+    applyColorSlotPatch(s, slot, colorSlot, rng);
 }
 
 } // namespace HighPro

@@ -179,17 +179,18 @@ struct EffectStack
 // === 照片滤镜 18 种 AE 预设 ===
 struct PhotoFilterPreset { const char* name; int r, g, b; };
 
-// === M7 智能随机 ===
-//   对 EffectStack 应用一组随机参数: 7 个效果各有 60% 概率开启,
-//   开启后参数在合理范围内随机. 不动 shadowProtectThreshold.
-//   seed = 0 表示用全局随机源; 否则用固定种子 (用于"同一方案不同层一致性"等场景, 可空着).
-void randomizeStack(EffectStack& s, quint32 seed = 0);
+    // === P0 智能随机 ===
+    //   对 EffectStack 应用一组随机参数: 7 个效果各有 60% 概率开启,
+    //   开启后参数在合理范围内随机. 不动 shadowProtectThreshold.
+    //   seed = 0 表示用全局随机源; 否则用固定种子 (用于"同一方案不同层一致性"等场景, 可空着).
+    void randomizeStack(EffectStack& s, quint32 seed = 0);
 extern const PhotoFilterPreset kPhotoFilterPresets[];
 extern const int kPhotoFilterPresetCount;
 
 // === P0 智能随机 (Palette + LayerSlot 驱动) ===
 // 前置声明, 避免拉入 LayerData.h / SchemePalette.h.
 enum class LayerSlot : int;
+enum class LayerColorSlot : int;
 struct SchemePalette;
 
 // 按 LayerSlot 分派 8 种参数策略, 输入 Palette 决定主/辅/点缀色相方向.
@@ -204,6 +205,13 @@ struct SchemePalette;
 // shadowProtectThreshold 保留 (不会被覆盖).
 void randomizeStackBySlot(EffectStack& s,
                           LayerSlot slot,
+                          const SchemePalette& palette,
+                          quint32 seed = 0);
+
+// P1 颜色 LayerSlot: colorSlot == Auto 时完全回退上面旧智能随机逻辑.
+void randomizeStackBySlot(EffectStack& s,
+                          LayerSlot slot,
+                          LayerColorSlot colorSlot,
                           const SchemePalette& palette,
                           quint32 seed = 0);
 

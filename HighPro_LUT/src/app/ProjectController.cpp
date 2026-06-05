@@ -170,6 +170,7 @@ bool ProjectController::loadProject(const QString& path, QJsonObject* outUiState
     m_project.hiddenLayerKeys = tmp.hiddenLayerKeys;
     m_project.skinSafeLayerKeys = tmp.skinSafeLayerKeys;
     m_project.layerSlots = tmp.layerSlots;   // P0: 用户手动指定的层语义
+    m_project.layerColorSlots = tmp.layerColorSlots; // P1: 用户手动指定的颜色语义
     m_project.layerLutPath = tmp.layerLutPath;
     m_project.schemes = tmp.schemes;
 
@@ -908,8 +909,9 @@ void ProjectController::smartRandomizeCurrentLayer()
     pushUndoSnapshot(QStringLiteral("智能随机当前层"));
     const SchemePalette& palette = ensurePaletteForScheme(m_project.currentSchemeIndex);
     const LayerSlot slot = m_project.slotFor(*layer);
+    const LayerColorSlot colorSlot = m_project.colorSlotFor(*layer);
 
-    randomizeStackBySlot(sc->layerEffects[k], slot, palette);
+    randomizeStackBySlot(sc->layerEffects[k], slot, colorSlot, palette);
     m_dirty = true;
     emit effectsChanged();
 }
@@ -931,7 +933,8 @@ void ProjectController::smartRandomizeAllLayers()
         if (!m_project.isLayerVisible(l)) continue;
         if (m_project.isSkinSafe(l)) continue;
         const LayerSlot slot = m_project.slotFor(l);
-        randomizeStackBySlot(sc->layerEffects[l.key()], slot, palette);
+        const LayerColorSlot colorSlot = m_project.colorSlotFor(l);
+        randomizeStackBySlot(sc->layerEffects[l.key()], slot, colorSlot, palette);
         ++processed;
     }
     if (processed > 0) { m_dirty = true; emit effectsChanged(); }
@@ -977,7 +980,8 @@ void ProjectController::smartRandomizeAllSchemes(bool includeBaked)
             if (!m_project.isLayerVisible(l)) continue;
             if (m_project.isSkinSafe(l)) continue;
             const LayerSlot slot = m_project.slotFor(l);
-            randomizeStackBySlot(sc.layerEffects[l.key()], slot, palette);
+            const LayerColorSlot colorSlot = m_project.colorSlotFor(l);
+            randomizeStackBySlot(sc.layerEffects[l.key()], slot, colorSlot, palette);
             ++processed;
         }
     }
@@ -1165,10 +1169,11 @@ void ProjectController::mixRandomizeAllSchemes(bool includeBaked)
             if (m_project.isSkinSafe(l)) continue;
 
             const LayerSlot slot = m_project.slotFor(l);
+            const LayerColorSlot colorSlot = m_project.colorSlotFor(l);
 
             // 生成两份独立的栈, 50/50 插值
             EffectStack smartStack;
-            randomizeStackBySlot(smartStack, slot, palette,
+            randomizeStackBySlot(smartStack, slot, colorSlot, palette,
                                  QRandomGenerator::global()->generate());
 
             EffectStack legacyStack;
@@ -1246,6 +1251,7 @@ void ProjectController::setLayerSlot(const QString& layerKey, LayerSlot slot)
             m_project.layerSlots.insert(layerKey, slot);
             changed = true;
         }
+        if (m_project.layerColorSlots.remove(layerKey)) changed = true;
     }
 
     // skinSafe 双向同步:
@@ -1265,6 +1271,62 @@ void ProjectController::setLayerSlot(const QString& layerKey, LayerSlot slot)
         m_dirty = true;
         emit visibilityChanged();   // 复用: LayerTreePanel 刷 emoji 前缀
         emit effectsChanged();      // 缩略图重烘 (slot 变了, 智能随机结果会变)
+    }
+}
+
+void ProjectController::setLayerColorSlot(const QString& layerKey, LayerColorSlot slot)
+{
+    if (layerKey.isEmpty()) return;
+
+    bool changed = false;
+    if (slot == LayerColorSlot::Auto) {
+        if (m_project.layerColorSlots.remove(layerKey)) changed = true;
+    } else {
+        const LayerColorSlot old = m_project.layerColorSlots.value(layerKey, LayerColorSlot::Auto);
+        if (old != slot) {
+            m_project.layerColorSlots.insert(layerKey, slot);
+            changed = true;
+        }
+        if (m_project.layerSlots.remove(layerKey)) changed = true;
+        if (m_project.skinSafeLayerKeys.remove(layerKey)) changed = true;
+    }
+
+    if (changed) {
+        m_dirty = true;
+        emit visibilityChanged();
+        emit effectsChanged();
+    }
+}
+
+void ProjectController::setAllLayerColorSlots(LayerColorSlot slot)
+{
+    bool changed = false;
+
+    if (slot == LayerColorSlot::Auto) {
+        changed = !m_project.layerColorSlots.isEmpty();
+        m_project.layerColorSlots.clear();
+    } else {
+        if (!m_project.layerSlots.isEmpty()) {
+            m_project.layerSlots.clear();
+            changed = true;
+        }
+        if (!m_project.skinSafeLayerKeys.isEmpty()) {
+            m_project.skinSafeLayerKeys.clear();
+            changed = true;
+        }
+        for (const auto& l : m_project.layers) {
+            const LayerColorSlot old = m_project.layerColorSlots.value(l.key(), LayerColorSlot::Auto);
+            if (old != slot) {
+                m_project.layerColorSlots.insert(l.key(), slot);
+                changed = true;
+            }
+        }
+    }
+
+    if (changed) {
+        m_dirty = true;
+        emit visibilityChanged();
+        emit effectsChanged();
     }
 }
 

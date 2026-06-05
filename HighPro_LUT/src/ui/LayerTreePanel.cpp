@@ -10,6 +10,10 @@
 #include <QSet>
 #include <QMenu>
 #include <QAction>
+#include <QAbstractItemView>
+#include <QFont>
+#include <QWidgetAction>
+#include <QPushButton>
 
 namespace HighPro {
 
@@ -17,6 +21,15 @@ namespace {
 constexpr int RoleLayerKey   = Qt::UserRole + 1;
 constexpr int RoleIsAddonSub = Qt::UserRole + 2;
 constexpr int RoleIsAddonRoot= Qt::UserRole + 3;
+
+bool isCheckIndicatorHit(QTreeWidget* tree, QTreeWidgetItem* item, const QPoint& pos)
+{
+    if (!tree || !item) return false;
+    const QRect vr = tree->visualItemRect(item);
+    const int depth = item->parent() ? 1 : 0;
+    const int indicatorX = vr.left() + depth * tree->indentation();
+    return QRect(indicatorX, vr.top(), 32, vr.height()).contains(pos);
+}
 }
 
 // AE 风格拖扫显隐: 在 QTreeWidget viewport 上按下左键,
@@ -40,14 +53,8 @@ protected:
             auto* it = m_tree->itemAt(me->pos());
             if (!it) break;
             if (!(it->flags() & Qt::ItemIsUserCheckable)) break;
+            if (!isCheckIndicatorHit(m_tree, it, me->pos())) break;
 
-            // 仅在指示器 (checkbox) 区域内触发拖扫. 该判定: x 坐标 < 树缩进 + 指示器宽
-            const QRect rect = m_tree->visualItemRect(it);
-            // 不强制限制点击在指示器, 让用户随便点中行也能拖
-            // 但忽略 expander 三角的左边距
-            (void)rect;
-
-            // 起点决定 mode: 起点是否要变成 checked
             const bool nowChecked = (it->checkState(0) == Qt::Checked);
             m_dragging  = true;
             m_targetState = nowChecked ? Qt::Unchecked : Qt::Checked;
@@ -68,6 +75,7 @@ protected:
             if (!it) break;
             if (m_visited.contains(it)) break;
             if (!(it->flags() & Qt::ItemIsUserCheckable)) break;
+            if (!isCheckIndicatorHit(m_tree, it, me->pos())) break;
 
             it->setCheckState(0, m_targetState);
             m_visited.insert(it);
@@ -104,6 +112,10 @@ LayerTreePanel::LayerTreePanel(QWidget* parent) : QWidget(parent)
     m_tree->header()->setStretchLastSection(true);
     m_tree->setRootIsDecorated(true);
     m_tree->setExpandsOnDoubleClick(true);
+    m_tree->setItemsExpandable(false);
+    m_tree->setAllColumnsShowFocus(true);
+    m_tree->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_tree->setSelectionMode(QAbstractItemView::SingleSelection);
     m_tree->setAlternatingRowColors(true);
     m_tree->setStyleSheet(
         "QTreeWidget { font-size: 13pt; }"
@@ -245,16 +257,31 @@ void LayerTreePanel::syncCheckStates()
         const bool skin = proj.skinSafeLayerKeys.contains(k);
         LayerSlot slot  = LayerSlot::Unknown;
         if (layer) slot = proj.slotFor(*layer);
+        const LayerColorSlot colorSlot = layer ? proj.colorSlotFor(*layer) : LayerColorSlot::Auto;
 
         QString newText = base;
+        QFont font = node->font(0);
+        font.setPointSize(m_tree->font().pointSize());
+        font.setBold(false);
         if (skin) {
-            newText = layerSlotEmoji(LayerSlot::Skin) + QStringLiteral(" ") + base;
+            newText = QStringLiteral("🛡️ ") + base;
+            font.setBold(true);
+        } else if (colorSlot != LayerColorSlot::Auto) {
+            newText = layerColorSlotEmoji(colorSlot) + QStringLiteral(" ") + base;
         } else if (slot != LayerSlot::Unknown) {
             newText = layerSlotEmoji(slot) + QStringLiteral(" ") + base;
         }
 
         if (node->text(0) != newText) node->setText(0, newText);
-        node->setForeground(0, skin ? QBrush(QColor(255, 200, 80)) : QBrush());
+        node->setFont(0, font);
+        node->setForeground(0, skin ? QBrush(QColor(255, 210, 74)) : QBrush());
+        if (layer) {
+            node->setToolTip(0, QString("%1\n动作: %2\n部件: %3\n颜色: %4")
+                             .arg(layer->rootDir,
+                                  layer->actionNames().join(", "),
+                                  layerSlotDisplayName(slot),
+                                  layerColorSlotDisplayName(colorSlot)));
+        }
     };
 
     const int topN = m_tree->topLevelItemCount();
@@ -308,6 +335,7 @@ void LayerTreePanel::onContextMenu(const QPoint& pos)
         if (l.key() == key) { layer = &l; break; }
     }
     const LayerSlot currentSlot = layer ? proj.slotFor(*layer) : LayerSlot::Unknown;
+    const LayerColorSlot currentColorSlot = layer ? proj.colorSlotFor(*layer) : LayerColorSlot::Auto;
     const bool      hasManual   = proj.layerSlots.contains(key)
                                   && proj.layerSlots.value(key) != LayerSlot::Unknown;
 
@@ -315,17 +343,33 @@ void LayerTreePanel::onContextMenu(const QPoint& pos)
 
     // --- 1. 旧肤色保护入口 (保留, 跟 slot=Skin 双向同步) ---
     QAction* aSkin = nullptr;
-    if (skin) {
-        aSkin = menu.addAction(QStringLiteral("取消肤色保护 (当前 %1 层)").arg(curN));
-    } else {
-        aSkin = menu.addAction(QStringLiteral("标为肤色保护 (当前 %1 层)").arg(curN));
-    }
-    aSkin->setToolTip(QStringLiteral("肤色层在所有方案下都不参与变色, 永远保持本体"));
+    QWidgetAction* waSkin = new QWidgetAction(&menu);
+    auto* skinBtn = new QPushButton(&menu);
+    skinBtn->setText(skin
+        ? QStringLiteral("取消肤色保护层 (当前 %1 层)").arg(curN)
+        : QStringLiteral("标为肤色保护层 (当前 %1 层)").arg(curN));
+    QFont skinFont = skinBtn->font();
+    skinFont.setBold(true);
+    skinBtn->setFont(skinFont);
+    skinBtn->setFlat(true);
+    skinBtn->setCursor(Qt::PointingHandCursor);
+    skinBtn->setStyleSheet(
+        "QPushButton{color:#ffd24a; text-align:left; padding:4px 22px; border:none;"
+        " background:transparent;}"
+        "QPushButton:hover{background:#3b6ea8; color:#ffd24a;}"
+        "QPushButton:pressed{background:#2f5d8e; color:#ffd24a;}");
+    skinBtn->setToolTip(QStringLiteral("肤色层在所有方案下都不参与变色, 永远保持本体"));
+    waSkin->setDefaultWidget(skinBtn);
+    menu.addAction(waSkin);
+    connect(skinBtn, &QPushButton::clicked, &menu, [&menu, waSkin](){
+        menu.close();
+        waSkin->trigger();
+    });
 
     menu.addSeparator();
 
-    // --- 2. P0: 设置层语义 → 子菜单 (9 项) ---
-    auto* subSlot = menu.addMenu(QStringLiteral("设置层语义 (智能随机用)"));
+    // --- 2. P0: 部件 LayerSlot → 子菜单 (旧逻辑) ---
+    auto* subSlot = menu.addMenu(QStringLiteral("部件 LayerSlot（旧逻辑）"));
     subSlot->setToolTip(QStringLiteral(
         "决定智能随机时该层用哪种参数策略.\n"
         "选 [自动] 走启发式 (body→肤色, num_00→服装, num_01→裙摆 ...).\n"
@@ -365,10 +409,51 @@ void LayerTreePanel::onContextMenu(const QPoint& pos)
     addSlotItem(LayerSlot::WeaponMetal, false);
     addSlotItem(LayerSlot::WeaponNonMetal, false);
 
+    auto addColorItems = [&](QMenu* target, bool allLayers) {
+        auto addOne = [&](LayerColorSlot s) {
+            const QString prefix = allLayers ? QStringLiteral("全部") : QString();
+            const QString emoji = layerColorSlotEmoji(s);
+            const QString label = s == LayerColorSlot::Auto
+                ? (allLayers ? QStringLiteral("全部自动") : QStringLiteral("自动"))
+                : QStringLiteral("%1%2 %3")
+                    .arg(prefix)
+                    .arg(emoji.isEmpty() ? QString() : QStringLiteral(" ") + emoji)
+                    .arg(layerColorSlotDisplayName(s));
+            QAction* a = target->addAction(label);
+            a->setCheckable(!allLayers);
+            if (!allLayers) a->setChecked(currentColorSlot == s);
+            a->setData(static_cast<int>(s));
+            return a;
+        };
+        addOne(LayerColorSlot::Auto);
+        target->addSeparator();
+        addOne(LayerColorSlot::Red);
+        addOne(LayerColorSlot::Orange);
+        addOne(LayerColorSlot::Yellow);
+        addOne(LayerColorSlot::Green);
+        addOne(LayerColorSlot::Cyan);
+        addOne(LayerColorSlot::Blue);
+        addOne(LayerColorSlot::Purple);
+        addOne(LayerColorSlot::Pink);
+        addOne(LayerColorSlot::Black);
+        addOne(LayerColorSlot::White);
+        addOne(LayerColorSlot::Silver);
+        addOne(LayerColorSlot::Gray);
+    };
+
+    menu.addSeparator();
+    auto* subSingleColor = menu.addMenu(QStringLiteral("单层颜色 LayerSlot"));
+    subSingleColor->setToolTip(QStringLiteral("只给当前右键层设置目标色调. 自动 = 回退旧智能随机."));
+    addColorItems(subSingleColor, false);
+
+    auto* subAllColor = menu.addMenu(QStringLiteral("全层颜色 LayerSlot"));
+    subAllColor->setToolTip(QStringLiteral("给所有层批量设置同一个目标色调. 全部自动 = 清空所有颜色指定."));
+    addColorItems(subAllColor, true);
+
     QAction* sel = menu.exec(m_tree->viewport()->mapToGlobal(pos));
     if (!sel) return;
 
-    if (sel == aSkin) {
+    if (sel == waSkin) {
         ctl.setLayerSkinSafe(key, !skin);
         return;
     }
@@ -382,6 +467,17 @@ void LayerTreePanel::onContextMenu(const QPoint& pos)
     if (qobject_cast<QMenu*>(sel->parent()) == subSlot) {
         const int iv = sel->data().toInt();
         ctl.setLayerSlot(key, static_cast<LayerSlot>(iv));
+        return;
+    }
+    if (qobject_cast<QMenu*>(sel->parent()) == subSingleColor) {
+        const int iv = sel->data().toInt();
+        ctl.setLayerColorSlot(key, static_cast<LayerColorSlot>(iv));
+        return;
+    }
+    if (qobject_cast<QMenu*>(sel->parent()) == subAllColor) {
+        const int iv = sel->data().toInt();
+        ctl.setAllLayerColorSlots(static_cast<LayerColorSlot>(iv));
+        return;
     }
 }
 

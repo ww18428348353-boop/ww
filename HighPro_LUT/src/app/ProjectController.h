@@ -98,6 +98,12 @@ public:
     //   slot != Skin    → 同步移出 skinSafeLayerKeys.
     void setLayerSlot(const QString& layerKey, LayerSlot slot);
 
+    // P1: 颜色 LayerSlot.
+    //   单层颜色: 只设置当前 layerKey.
+    //   全层颜色: 批量设置所有 layerKey. Auto 会清空对应记录, 回退旧逻辑.
+    void setLayerColorSlot(const QString& layerKey, LayerColorSlot slot);
+    void setAllLayerColorSlots(LayerColorSlot slot);
+
     // M5: 方案管理
     int  schemeCount() const { return m_project.schemes.size(); }
     int  currentSchemeIndex() const { return m_project.currentSchemeIndex; }

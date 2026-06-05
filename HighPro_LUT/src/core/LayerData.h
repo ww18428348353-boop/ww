@@ -29,6 +29,25 @@ enum class LayerSlot : int {
     WeaponNonMetal,
 };
 
+// 颜色层角色 (P1): 决定智能随机时该层偏向哪个目标色调.
+// Auto = 不指定颜色, 完全沿用当前 SchemePalette / 部件 LayerSlot 旧逻辑.
+// 该 enum 不替代 LayerSlot: LayerSlot 管“部件/材质”, LayerColorSlot 管“目标色调”.
+enum class LayerColorSlot : int {
+    Auto = 0,
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Cyan,
+    Blue,
+    Purple,
+    Pink,
+    Black,
+    White,
+    Silver,
+    Gray,
+};
+
 // --- LayerSlot helper ---
 // 字符串 ↔ enum (JSON 兼容). 未识别字符串返回 Unknown.
 QString   layerSlotToString(LayerSlot slot);
@@ -40,6 +59,12 @@ QString   layerSlotDisplayName(LayerSlot slot);
 // LayerTreePanel 在 refresh / sync 多次刷新时, 先剥掉旧 emoji + 空格再加新的.
 // 否则会出现 "👕 👕 👕 num_00" 累积叠加.
 QString   stripLayerSlotPrefix(QString text);
+
+// --- LayerColorSlot helper ---
+QString        layerColorSlotToString(LayerColorSlot slot);
+LayerColorSlot layerColorSlotFromString(const QString& s);
+QString        layerColorSlotEmoji(LayerColorSlot slot);
+QString        layerColorSlotDisplayName(LayerColorSlot slot);
 
 // 单个动作 = 多方向 × 多帧 (帧路径列表)
 struct Action

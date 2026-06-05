@@ -59,6 +59,12 @@ struct Project
     //   - 最终保护源仍是 skinSafeLayerKeys, slotFor() 命中 skinSafe 永远返回 Skin.
     QHash<QString, LayerSlot> layerSlots;
 
+    // P1 颜色 LayerSlot: 用户手动指定的目标色调.
+    //   - 未在表中或 Auto → 完全沿用旧智能随机逻辑.
+    //   - 单层颜色右键只写当前 layerKey.
+    //   - 全层颜色右键批量写所有 layerKey, 不额外保存全局字段.
+    QHash<QString, LayerColorSlot> layerColorSlots;
+
     QString currentAction;
     int     currentDirection = 0;
     int     currentFrame     = 0;
@@ -81,6 +87,7 @@ struct Project
         hiddenLayerKeys.clear();
         skinSafeLayerKeys.clear();
         layerSlots.clear();
+        layerColorSlots.clear();
         currentAddonKey.clear();
         currentAction.clear();
         currentDirection = 0;
@@ -132,6 +139,11 @@ struct Project
         const LayerSlot saved = layerSlots.value(l.key(), LayerSlot::Unknown);
         if (saved != LayerSlot::Unknown) return saved;
         return defaultSlotFor(l);
+    }
+
+    // P1: 实际颜色 slot. Auto = 不干预旧智能随机.
+    LayerColorSlot colorSlotFor(const LayerData& l) const {
+        return layerColorSlots.value(l.key(), LayerColorSlot::Auto);
     }
 
     QString lutPathFor(const LayerData& l) const {
